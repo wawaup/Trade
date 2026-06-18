@@ -1,6 +1,9 @@
 const fmtPct = (value) => `${(value * 100).toFixed(2)}%`;
-const fmtMoney = (value) => value ? `$${value.toFixed(2)}` : "-";
+const fmtMoney = (value) => Number.isFinite(value) && value > 0 ? `$${value.toFixed(2)}` : "-";
+
 let latestAllocation = null;
+let backtestChart = null;
+let liveChart = null;
 
 function switchPage(targetId) {
   document.querySelectorAll(".page").forEach((page) => {
@@ -11,26 +14,14 @@ function switchPage(targetId) {
   });
 }
 
-document.querySelectorAll("[data-page-target]").forEach((button) => {
-  button.addEventListener("click", () => switchPage(button.dataset.pageTarget));
-});
-
-function toggleKnowledgeCard() {
+function toggleKnowledgeCard(event) {
+  event.stopPropagation();
   document.getElementById("knowledgeCard").classList.toggle("collapsed");
 }
-
-document.getElementById("knowledgeToggle").addEventListener("click", toggleKnowledgeCard);
 
 function collapseKnowledgeCard() {
   document.getElementById("knowledgeCard").classList.add("collapsed");
 }
-
-document.addEventListener("click", (event) => {
-  const card = document.getElementById("knowledgeCard");
-  if (!card.contains(event.target)) {
-    collapseKnowledgeCard();
-  }
-});
 
 function clsFor(value) {
   if (value < 0) return "negative";
@@ -95,12 +86,55 @@ function renderStress(rows) {
   `).join("");
 }
 
+function renderDataSources(payload) {
+  const root = document.getElementById("dataSourceCards");
+  if (!root) return;
+  const sources = payload.sources || [];
+  root.innerHTML = sources.map((source) => `
+    <article class="source-card">
+      <strong>${source.id}</strong>
+      <span>${source.label}</span>
+      <em>${source.requiresNetwork ? "需要联网" : "本地可用"}</em>
+    </article>
+  `).join("");
+}
+
+function renderPaperOrders(payload) {
+  const root = document.getElementById("paperOrderRows");
+  if (!root) return;
+  const orders = payload.orders || [];
+  root.innerHTML = orders.length ? orders.map((order) => `
+    <tr>
+      <td>${order.symbol || "-"}</td>
+      <td>${order.side || "-"}</td>
+      <td>${order.sourceSignal || order.source_signal || "-"}</td>
+      <td>${order.status || "pending"}</td>
+      <td>${order.reason || "-"}</td>
+    </tr>
+  `).join("") : `<tr><td colspan="5">暂无 Paper 订单。</td></tr>`;
+}
+
+function renderResultHistory(payload) {
+  const root = document.getElementById("resultHistoryRows");
+  if (!root) return;
+  const results = payload.results || [];
+  root.innerHTML = results.length ? results.map((result) => `
+    <tr>
+      <td>${result.resultId || result.result_id || "-"}</td>
+      <td>${result.createdAt || "-"}</td>
+      <td>${result.engineVersion || result.engine_version || "-"}</td>
+      <td>${result.summary ? fmtPct(result.summary.totalReturnPct || 0) : "-"}</td>
+    </tr>
+  `).join("") : `<tr><td colspan="4">暂无保存的回测结果。</td></tr>`;
+}
+
 function renderRiskLights(live) {
   const safeSpread = live.positions.every((row) => row.spreadPct <= 0.005);
+  const dangerRisk = live.positions.some((row) => row.risk === "危险");
   const activeT = live.positions.some((row) => row.layers > 0);
   const items = [
-    ["点差过滤", safeSpread ? "SAFE" : "WIDE SPREAD", safeSpread ? "" : "warn"],
-    ["插针保护", "READY", ""],
+    ["点差过滤", safeSpread ? "SAFE" : "WIDE SPREAD", safeSpread ? "" : "danger"],
+    ["插针保护", dangerRisk ? "DANGER" : "READY", dangerRisk ? "danger" : ""],
     ["全局T仓", activeT ? "ACTIVE" : "IDLE", activeT ? "warn" : ""],
     ["虚拟钱包", "ISOLATED", ""],
   ];
@@ -112,9 +146,64 @@ function renderRiskLights(live) {
   `).join("");
 }
 
+function initTradingChart(containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return null;
+  container.innerHTML = "";
+  if (!window.LightweightCharts) {
+    container.innerHTML = '<div class="empty-panel">图表库未加载，请检查网络后刷新。</div>';
+    return null;
+  }
+  const chart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: container.clientHeight || (containerId === "liveChart" ? 460 : 300),
+    layout: {
+      background: { color: "transparent" },
+      textColor: "#d7dde7",
+    },
+    grid: {
+      vertLines: { color: "rgba(84, 99, 121, 0.25)" },
+      horzLines: { color: "rgba(84, 99, 121, 0.25)" },
+    },
+    rightPriceScale: { borderColor: "rgba(84, 99, 121, 0.5)" },
+    timeScale: { borderColor: "rgba(84, 99, 121, 0.5)", timeVisible: true },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  });
+  const candles = chart.addCandlestickSeries({
+    upColor: "#45d39a",
+    downColor: "#e56b67",
+    borderVisible: false,
+    wickUpColor: "#45d39a",
+    wickDownColor: "#e56b67",
+  });
+  const vwap = chart.addLineSeries({
+    color: "#86b9ff",
+    lineWidth: 2,
+    priceLineVisible: false,
+  });
+  const resize = () => chart.applyOptions({ width: container.clientWidth });
+  window.addEventListener("resize", resize);
+  return { chart, candles, vwap };
+}
+
 function renderChartPlaceholder() {
   document.getElementById("backtestChart").dataset.ready = "true";
   document.getElementById("liveChart").dataset.ready = "true";
+}
+
+function renderChart(chartRef, data) {
+  if (!chartRef || !data) return;
+  chartRef.candles.setData(data.candles.map(([time, open, high, low, close]) => ({ time, open, high, low, close })));
+  chartRef.vwap.setData(data.vwap.map(([time, value]) => ({ time, value })));
+  chartRef.chart.timeScale().fitContent();
+}
+
+async function loadKlines(symbol = "NVDA") {
+  const response = await fetch(`/api/klines?symbol=${encodeURIComponent(symbol)}&resolution=1m`);
+  const data = await response.json();
+  renderChart(backtestChart, data);
+  renderChart(liveChart, data);
+  renderChartPlaceholder();
 }
 
 function renderLive(live) {
@@ -132,7 +221,9 @@ function renderLive(live) {
     </tr>
   `).join("");
   document.getElementById("guardrails").innerHTML = live.guardrails.map((item) => `<li>${item}</li>`).join("");
-  document.getElementById("terminalLog").textContent = live.logs.join("\n");
+  const term = document.getElementById("terminalLog");
+  term.textContent = live.logs.join("\n");
+  term.scrollTop = term.scrollHeight;
   renderRiskLights(live);
 }
 
@@ -154,8 +245,50 @@ function renderAllocationForm(allocation) {
   `).join("");
 }
 
+function validateAllocationForm() {
+  const message = document.getElementById("allocationMessage");
+  const rows = Array.from(document.querySelectorAll(".allocation-row"));
+  const inputs = Array.from(document.querySelectorAll("#allocationForm input"));
+  inputs.forEach((input) => input.classList.remove("error"));
+  message.textContent = "";
+  message.className = "form-message";
+
+  const totalAccount = document.getElementById("totalAccountQuote");
+  const totalValue = Number(totalAccount.value);
+  let valid = Number.isFinite(totalValue) && totalValue > 0;
+  if (!valid) totalAccount.classList.add("error");
+
+  const totalPctSum = rows.reduce((sum, row) => sum + Number(row.querySelector("[name='totalPct']").value), 0);
+  if (totalPctSum > 100) {
+    rows.forEach((row) => row.querySelector("[name='totalPct']").classList.add("error"));
+    valid = false;
+  }
+
+  rows.forEach((row) => {
+    const totalPctInput = row.querySelector("[name='totalPct']");
+    const tPctInput = row.querySelector("[name='tPct']");
+    const totalPct = Number(totalPctInput.value);
+    const tPct = Number(tPctInput.value);
+    if (!Number.isFinite(totalPct) || totalPct < 0 || totalPct > 100) {
+      totalPctInput.classList.add("error");
+      valid = false;
+    }
+    if (!Number.isFinite(tPct) || tPct < 0 || tPct > 100 || tPct > totalPct) {
+      tPctInput.classList.add("error");
+      valid = false;
+    }
+  });
+
+  if (!valid) {
+    message.textContent = "请检查仓位：总仓位合计不能超过100%，且每只股票T仓%不能大于该股票总仓位%。";
+    message.className = "form-message negative";
+  }
+  return valid;
+}
+
 async function saveAllocation(event) {
   event.preventDefault();
+  if (!validateAllocationForm()) return;
   const symbols = Array.from(document.querySelectorAll(".allocation-row")).map((row) => ({
     symbol: row.dataset.symbol,
     totalPct: Number(row.querySelector("[name='totalPct']").value) / 100,
@@ -178,25 +311,84 @@ async function saveAllocation(event) {
     return;
   }
   latestAllocation = body.allocation;
+  renderAllocationForm(body.allocation);
   message.textContent = "仓位比例已保存";
   message.className = "form-message positive";
-  await refreshState();
+  await Promise.all([loadStaticState(), refreshLiveState()]);
 }
 
-document.getElementById("allocationForm").addEventListener("submit", saveAllocation);
+function collectBacktestControls() {
+  return {
+    symbols: Array.from(document.querySelectorAll("[name='backtestSymbol']:checked")).map((input) => input.value),
+    sampleSplit: document.querySelector("#sampleSplit .active")?.dataset.sample || "in",
+    slippageBps: Number(document.getElementById("slippageBps").value),
+    spreadBps: Number(document.getElementById("spreadBps").value),
+  };
+}
 
-async function refreshState() {
+async function runBacktestFromControls() {
+  const payload = collectBacktestControls();
+  const response = await fetch("/api/backtest/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    document.getElementById("connectionStatus").textContent = `回测失败：${body.error}`;
+    return;
+  }
+  renderSummary(body.backtest.summary);
+  renderAssets(body.backtest.assets);
+  const symbol = payload.symbols[0] || "NVDA";
+  await loadKlines(symbol);
+  document.getElementById("updatedAt").textContent = new Date().toLocaleTimeString("zh-CN");
+}
+
+function switchFactorTab(panelName) {
+  document.querySelectorAll("[data-factor-target]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.factorTarget === panelName);
+  });
+  document.querySelectorAll("[data-factor-panel]").forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.factorPanel === panelName);
+  });
+}
+
+function bindControlPanel() {
+  document.querySelectorAll("[name='backtestSymbol'], #slippageBps, #spreadBps").forEach((control) => {
+    control.addEventListener("change", runBacktestFromControls);
+  });
+  document.querySelectorAll("#sampleSplit button").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.querySelectorAll("#sampleSplit button").forEach((item) => item.classList.remove("active"));
+      button.classList.add("active");
+      runBacktestFromControls();
+    });
+  });
+  document.querySelectorAll("[data-factor-target]").forEach((button) => {
+    button.addEventListener("click", () => switchFactorTab(button.dataset.factorTarget));
+  });
+  document.getElementById("runBacktestButton").addEventListener("click", runBacktestFromControls);
+}
+
+async function loadStaticState() {
+  const response = await fetch("/api/state/static");
+  const state = await response.json();
+  renderGlossary(state.glossary);
+  renderSummary(state.backtest.summary);
+  renderAssets(state.backtest.assets);
+  renderSensitivity(state.backtest.sensitivity);
+  renderStress(state.backtest.stress);
+  renderAllocationForm(state.allocation);
+  document.getElementById("connectionStatus").textContent = "已连接";
+  document.getElementById("updatedAt").textContent = new Date().toLocaleTimeString("zh-CN");
+}
+
+async function refreshLiveState() {
   try {
-    const response = await fetch("/api/state");
+    const response = await fetch("/api/state/live");
     const state = await response.json();
-    renderGlossary(state.glossary);
-    renderSummary(state.backtest.summary);
-    renderAssets(state.backtest.assets);
-    renderSensitivity(state.backtest.sensitivity);
-    renderStress(state.backtest.stress);
     renderLive(state.live);
-    renderAllocationForm(state.allocation);
-    renderChartPlaceholder();
     document.getElementById("connectionStatus").textContent = "已连接";
     document.getElementById("updatedAt").textContent = new Date().toLocaleTimeString("zh-CN");
   } catch (error) {
@@ -205,5 +397,38 @@ async function refreshState() {
   }
 }
 
-refreshState();
-setInterval(refreshState, 5000);
+async function loadPlatformData() {
+  const [sourcesRes, paperRes, resultsRes] = await Promise.all([
+    fetch("/api/data-sources"),
+    fetch("/api/paper/orders"),
+    fetch("/api/backtest/results"),
+  ]);
+  renderDataSources(await sourcesRes.json());
+  renderPaperOrders(await paperRes.json());
+  renderResultHistory(await resultsRes.json());
+}
+
+async function boot() {
+  document.querySelectorAll("[data-page-target]").forEach((button) => {
+    button.addEventListener("click", () => switchPage(button.dataset.pageTarget));
+  });
+  document.getElementById("knowledgeToggle").addEventListener("click", toggleKnowledgeCard);
+  document.addEventListener("click", (event) => {
+    const card = document.getElementById("knowledgeCard");
+    if (!card.contains(event.target)) collapseKnowledgeCard();
+  });
+  document.getElementById("allocationForm").addEventListener("submit", saveAllocation);
+  bindControlPanel();
+  backtestChart = initTradingChart("backtestChart");
+  liveChart = initTradingChart("liveChart");
+  await loadStaticState();
+  await refreshLiveState();
+  await loadPlatformData();
+  await loadKlines("NVDA");
+  setInterval(refreshLiveState, 2000);
+}
+
+boot().catch((error) => {
+  document.getElementById("connectionStatus").textContent = "连接失败";
+  console.error(error);
+});

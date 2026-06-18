@@ -72,6 +72,15 @@ class FrontendFilesTest(unittest.TestCase):
         self.assertIn("validateAllocationForm", js)
         self.assertIn("scrollTop = term.scrollHeight", js)
 
+    def test_platform_frontend_fetches_new_api_endpoints(self):
+        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("/api/data-sources", js)
+        self.assertIn("/api/paper/orders", js)
+        self.assertIn("/api/backtest/results", js)
+        self.assertIn("function renderPaperOrders", js)
+        self.assertIn("function renderDataSources", js)
+
     def test_docker_service_files_exist(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
