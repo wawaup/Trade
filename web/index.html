@@ -3,242 +3,351 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Trade Quant Research Desk</title>
+  <title>Trade QuantDinger Desk</title>
   <link rel="stylesheet" href="./styles.css">
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
-  <div class="shell">
-    <header class="topbar">
-      <nav class="top-page-nav" aria-label="主视图切换">
-        <button class="active" type="button" data-page-target="researchPage">研究仪表盘</button>
-        <button type="button" data-page-target="backtestPage">策略回测</button>
-        <button type="button" data-page-target="paperOrdersPage">Paper订单</button>
-        <button type="button" data-page-target="dataResultsPage">数据与结果</button>
+  <div class="qd-app-shell">
+    <aside class="qd-sidebar" aria-label="Trade 主导航">
+      <div class="qd-brand">
+        <div class="qd-mark">T</div>
+        <strong>TradeDinger</strong>
+      </div>
+      <nav class="qd-nav">
+        <button type="button" data-page-target="indicatorIdePage" class="active">Indicator IDE</button>
+        <button type="button" data-page-target="strategyLivePage">Strategy &amp; Live</button>
+        <button type="button" data-page-target="paperOrdersPage">Trading Bot</button>
+        <button type="button" data-page-target="dataResultsPage">Data / Results</button>
       </nav>
-      <div>
-        <span class="eyebrow">Trade · QuantDinger Thin Platform</span>
-        <h1>量化研究与纸面执行工作台</h1>
+      <div class="qd-sidebar-footer">
+        <span>CONTACT US</span>
+        <a href="#">Support</a>
+        <a href="#">Feature request</a>
+        <small>Paper-only workspace</small>
       </div>
-      <div class="status-strip">
-        <span id="connectionStatus">连接中</span>
-        <span id="updatedAt">--</span>
-      </div>
-    </header>
+    </aside>
 
-    <main class="workspace platform-layout">
-      <section class="page active" id="researchPage" aria-labelledby="researchTitle">
-        <div class="live-trading-layout">
-          <aside class="live-left-panel surface-panel">
+    <section class="qd-main">
+      <header class="qd-topbar">
+        <div class="qd-top-actions">
+          <button type="button" aria-label="菜单">☰</button>
+          <button type="button" aria-label="刷新">↻</button>
+        </div>
+        <div class="qd-status-strip">
+          <span id="connectionStatus">连接中</span>
+          <span id="updatedAt">--</span>
+          <span>paper_only=true</span>
+        </div>
+      </header>
+
+      <main class="qd-workspace">
+        <section class="qd-page active" id="indicatorIdePage" aria-labelledby="indicatorIdeTitle">
+          <div class="qd-ide-grid">
+            <aside class="qd-code-panel">
+              <div class="qd-panel-head">
+                <div>
+                  <span class="eyebrow">Code Editor</span>
+                  <h2 id="indicatorIdeTitle">T Strategy Script</h2>
+                </div>
+                <button type="button">Purchased</button>
+              </div>
+              <pre class="qd-code-slab"><code>my_indicator_name = "Trade T Bucket"
+my_indicator_description = "VWAP grid T strategy"
+
+df = df.copy()
+vwap = (df["quote_volume"].cumsum() / df["volume"].cumsum())
+near_vwap = abs(df["close"] / vwap - 1) &lt; 0.012
+
+df["buy"] = near_vwap &amp; spread_ok &amp; bucket_has_room
+df["sell"] = profit_after_fee &amp; trailing_exit_locks_net_profit
+
+order_intent = signal_to_order_intent(
+    symbol=symbol,
+    signal="OPEN_T" if df["buy"].iloc[-1] else "PAUSE",
+    paper_only=True,
+)</code></pre>
+              <section class="allocation-panel">
+                <h3>仓位分配设置</h3>
+                <form id="allocationForm">
+                  <label class="field">
+                    <span>币安总账户金额 USDT/USDC</span>
+                    <input id="totalAccountQuote" name="totalAccountQuote" type="number" min="1" step="100">
+                  </label>
+                  <div id="allocationRows" class="allocation-rows"></div>
+                  <button class="save-button" type="submit">保存仓位比例</button>
+                  <p id="allocationMessage" class="form-message"></p>
+                </form>
+              </section>
+            </aside>
+
+            <section class="qd-market-stage">
+              <div class="qd-control-strip">
+                <div class="qd-select-pack">
+                  <span>WATCHLIST</span>
+                  <strong>NVDA / TSLA / SPCX</strong>
+                </div>
+                <div class="qd-timeframe">
+                  <button type="button">1m</button>
+                  <button type="button">5m</button>
+                  <button type="button">15m</button>
+                  <button class="active" type="button">1H</button>
+                  <button type="button">1D</button>
+                </div>
+                <button class="qd-primary" type="button" id="runBacktestButton">Run Backtest</button>
+              </div>
+
+              <section class="qd-chart-card">
+                <div class="section-head">
+                  <div>
+                    <span class="eyebrow">Chart</span>
+                    <h2>K线 / VWAP 主视窗</h2>
+                  </div>
+                  <div class="mode-pill">EMA / VWAP / T buckets</div>
+                </div>
+                <div class="chart-container" id="backtestChart"></div>
+              </section>
+
+              <section class="qd-backtest-params">
+                <div class="section-head">
+                  <h3>Backtest Parameters</h3>
+                  <span class="mode-pill">current close fills</span>
+                </div>
+                <div class="qd-param-grid">
+                  <div>
+                    <h4>Symbols</h4>
+                    <div class="symbol-checks">
+                      <label><input type="checkbox" name="backtestSymbol" value="SPCX" checked> SPCX</label>
+                      <label><input type="checkbox" name="backtestSymbol" value="TSLA" checked> TSLA</label>
+                      <label><input type="checkbox" name="backtestSymbol" value="NVDA" checked> NVDA</label>
+                      <label><input type="checkbox" name="backtestSymbol" value="MU" checked> MU</label>
+                      <label><input type="checkbox" name="backtestSymbol" value="CPOX" checked> CPOX</label>
+                    </div>
+                  </div>
+                  <div>
+                    <h4>Sample</h4>
+                    <div class="segmented full" id="sampleSplit">
+                      <button class="active" type="button" data-sample="in">In-Sample</button>
+                      <button type="button" data-sample="out">Out-of-Sample</button>
+                    </div>
+                  </div>
+                  <div>
+                    <h4>Friction</h4>
+                    <label class="field"><span>滑点 bps</span><input id="slippageBps" type="number" min="0" max="200" step="1" value="30"></label>
+                    <label class="field"><span>点差 bps</span><input id="spreadBps" type="number" min="0" max="200" step="1" value="20"></label>
+                  </div>
+                </div>
+              </section>
+
+              <section class="qd-results-tabs">
+                <div class="segmented">
+                  <button class="active" type="button" data-factor-target="assets">Backtest Results</button>
+                  <button type="button" data-factor-target="sensitivity">Smart Tuning</button>
+                  <button type="button" data-factor-target="stress">Stress</button>
+                  <button type="button" data-factor-target="trades">Trades</button>
+                </div>
+                <div class="factor-panel active" data-factor-panel="assets">
+                  <div class="metric-grid" id="backtestSummary"></div>
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>标的</th>
+                          <th>板块</th>
+                          <th>收益</th>
+                          <th>最大回撤</th>
+                          <th>胜率</th>
+                          <th>交易</th>
+                        </tr>
+                      </thead>
+                      <tbody id="assetRows"></tbody>
+                    </table>
+                  </div>
+                </div>
+                <div class="factor-panel" data-factor-panel="sensitivity">
+                  <h3>参数敏感度</h3>
+                  <div id="sensitivityBars" class="bars"></div>
+                </div>
+                <div class="factor-panel" data-factor-panel="stress">
+                  <h3>压力测试</h3>
+                  <div id="stressList" class="stress-list"></div>
+                </div>
+                <div class="factor-panel" data-factor-panel="trades">
+                  <div class="empty-panel">成交明细将随 Paper 订单在这里滚动展示。</div>
+                </div>
+              </section>
+            </section>
+
+            <aside class="qd-quick-trade">
+              <div class="qd-panel-head">
+                <div>
+                  <span class="eyebrow">Quick Trade</span>
+                  <h2>Paper订单</h2>
+                </div>
+                <span class="mode-pill">SAFE</span>
+              </div>
+              <div class="qd-price-box">
+                <strong>NVDA</strong>
+                <span>$72,726</span>
+              </div>
+              <div class="qd-side-buttons">
+                <button class="long" type="button">Long</button>
+                <button class="short" type="button">Short</button>
+              </div>
+              <div class="qd-order-form">
+                <label class="field"><span>Amount (USDT)</span><input type="number" value="350"></label>
+                <div class="segmented full">
+                  <button class="active" type="button">Market</button>
+                  <button type="button">Limit</button>
+                </div>
+              </div>
+              <h3>风控指示灯</h3>
+              <div id="riskLights" class="risk-lights"></div>
+              <h3>Paper order log</h3>
+              <div class="table-wrap compact-table">
+                <table class="paper-orders-table">
+                  <tbody id="paperOrderRows"></tbody>
+                </table>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="qd-page" id="strategyLivePage" aria-labelledby="strategyLiveTitle">
+          <div class="qd-live-grid">
+            <aside class="qd-strategy-list">
+              <div class="section-head">
+                <h2 id="strategyLiveTitle">Strategy List</h2>
+                <button class="qd-primary" type="button">Create Strategy</button>
+              </div>
+              <div class="qd-strategy-group active">
+                <span>11222</span>
+                <strong>11222-SOL/USDT</strong>
+                <em>Running · 1m · Bitget</em>
+              </div>
+              <div class="qd-strategy-group">
+                <span>Trade T Bucket</span>
+                <strong>NVDA / TSLA / SPCX</strong>
+                <em>Paper stopped · 1H</em>
+              </div>
+              <div class="qd-strategy-group">
+                <span>Filtered SuperTrend Strategy</span>
+                <strong>Watchlist basket</strong>
+                <em>Stopped · 15m</em>
+              </div>
+            </aside>
+
+            <section class="qd-live-detail">
+              <div class="qd-hero-card">
+                <div>
+                  <h2>Trade-T-Bucket / Paper</h2>
+                  <span class="mode-pill" id="tradeMode">模拟监控</span>
+                </div>
+                <button class="qd-danger" type="button">Stop Strategy</button>
+              </div>
+              <div class="metric-grid" id="strategyPerformance">
+                <div class="metric"><span>Total Return</span><strong class="positive">--</strong></div>
+                <div class="metric"><span>Max Drawdown</span><strong class="warning">--</strong></div>
+                <div class="metric"><span>Win Rate</span><strong>--</strong></div>
+                <div class="metric"><span>Total Trades</span><strong>--</strong></div>
+              </div>
+              <section class="qd-chart-card">
+                <div class="section-head">
+                  <div>
+                    <h2>Equity Curve</h2>
+                    <span class="eyebrow">latest point includes unrealized P&amp;L</span>
+                  </div>
+                </div>
+                <div class="chart-container live-chart" id="liveChart"></div>
+                <div class="equity-line" id="equityLine"></div>
+              </section>
+              <div class="split-grid">
+                <section class="surface-panel">
+                  <h3>实时持仓与风控</h3>
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>标的</th>
+                          <th>状态</th>
+                          <th>最新价</th>
+                          <th>T层数</th>
+                          <th>总预算</th>
+                          <th>T预算</th>
+                          <th>点差</th>
+                          <th>风险</th>
+                        </tr>
+                      </thead>
+                      <tbody id="liveRows"></tbody>
+                    </table>
+                  </div>
+                </section>
+                <section class="surface-panel">
+                  <h3>Strategy Logs</h3>
+                  <pre id="terminalLog" class="terminal"></pre>
+                </section>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="qd-page" id="paperOrdersPage" aria-labelledby="paperOrdersTitle">
+          <section class="surface-panel">
             <div class="section-head">
               <div>
-                <span class="eyebrow">Research</span>
-                <h2 id="researchTitle">研究仪表盘</h2>
+                <span class="eyebrow">Paper Execution</span>
+                <h2 id="paperOrdersTitle">Paper订单</h2>
               </div>
-              <div class="mode-pill" id="tradeMode">模拟监控</div>
+              <div class="mode-pill">no live adapter</div>
             </div>
-            <section class="allocation-panel">
-              <h3>仓位分配设置</h3>
-              <form id="allocationForm">
-                <label class="field">
-                  <span>币安总账户金额 USDT/USDC</span>
-                  <input id="totalAccountQuote" name="totalAccountQuote" type="number" min="1" step="100">
-                </label>
-                <div id="allocationRows" class="allocation-rows"></div>
-                <button class="save-button" type="submit">保存仓位比例</button>
-                <p id="allocationMessage" class="form-message"></p>
-              </form>
-            </section>
             <div class="table-wrap">
-              <h3>实时持仓与风控</h3>
-              <table>
+              <table class="paper-orders-table">
                 <thead>
                   <tr>
                     <th>标的</th>
+                    <th>方向</th>
+                    <th>信号</th>
                     <th>状态</th>
-                    <th>最新价</th>
-                    <th>T层数</th>
-                    <th>总预算</th>
-                    <th>T预算</th>
-                    <th>点差</th>
-                    <th>风险</th>
+                    <th>原因</th>
                   </tr>
                 </thead>
-                <tbody id="liveRows"></tbody>
+                <tbody id="paperOrderRowsFull"></tbody>
               </table>
             </div>
-          </aside>
-
-          <section class="live-center-panel surface-panel">
-            <div class="section-head">
-              <div>
-                <span class="eyebrow">Realtime</span>
-                <h2>日内 1m 图 / Avg Entry 线</h2>
-              </div>
-              <div class="mode-pill">VWAP overlay</div>
-            </div>
-            <div class="chart-container live-chart" id="liveChart"></div>
-            <h3>Terminal 风格执行 Log</h3>
-            <pre id="terminalLog" class="terminal"></pre>
           </section>
+        </section>
 
-          <aside class="live-right-panel surface-panel">
-            <h2>风控指示灯</h2>
-            <div id="riskLights" class="risk-lights"></div>
-            <h3>保护规则</h3>
-            <ul id="guardrails" class="guardrails"></ul>
-          </aside>
-        </div>
-      </section>
-
-      <section class="page" id="backtestPage" aria-labelledby="backtestTitle">
-        <div class="research-lab-layout">
-          <aside class="strategy-control-panel surface-panel">
-            <span class="eyebrow">Control</span>
-            <h2 id="backtestTitle">策略回测</h2>
-            <section>
-              <h3>选择标的</h3>
-              <div class="symbol-checks">
-                <label><input type="checkbox" name="backtestSymbol" value="SPCX" checked> SPCX</label>
-                <label><input type="checkbox" name="backtestSymbol" value="TSLA" checked> TSLA</label>
-                <label><input type="checkbox" name="backtestSymbol" value="NVDA" checked> NVDA</label>
-                <label><input type="checkbox" name="backtestSymbol" value="MU" checked> MU</label>
-                <label><input type="checkbox" name="backtestSymbol" value="CPOX" checked> CPOX</label>
-              </div>
-            </section>
-            <section>
-              <h3>样本切分</h3>
-              <div class="segmented full" id="sampleSplit">
-                <button class="active" type="button" data-sample="in">In-Sample</button>
-                <button type="button" data-sample="out">Out-of-Sample</button>
-              </div>
-            </section>
-            <section>
-              <h3>摩擦参数</h3>
-              <label class="field"><span>滑点 bps</span><input id="slippageBps" type="number" min="0" max="200" step="1" value="30"></label>
-              <label class="field"><span>点差 bps</span><input id="spreadBps" type="number" min="0" max="200" step="1" value="20"></label>
-            </section>
-            <button class="save-button" type="button" id="runBacktestButton">运行回测</button>
-            <div class="metric-grid compact" id="backtestSummary"></div>
-          </aside>
-
-          <section class="quant-workspace">
-            <div class="surface-panel chart-hero">
+        <section class="qd-page" id="dataResultsPage" aria-labelledby="dataResultsTitle">
+          <div class="split-grid">
+            <section class="surface-panel">
               <div class="section-head">
                 <div>
-                  <span class="eyebrow">Chart</span>
-                  <h2>K线 / VWAP 主视窗</h2>
+                  <span class="eyebrow">Sources</span>
+                  <h2 id="dataResultsTitle">数据与结果</h2>
                 </div>
-                <div class="mode-pill">模拟K线</div>
               </div>
-              <div class="chart-container" id="backtestChart"></div>
-            </div>
-            <div class="surface-panel nav-curve-panel">
-              <div class="section-head">
-                <h3>NAV Curve / 净资产权益曲线</h3>
-                <span class="eyebrow">Core vs T Bucket</span>
-              </div>
-              <div class="equity-line" id="equityLine"></div>
-            </div>
-          </section>
-
-          <section class="factor-tabs surface-panel">
-            <div class="segmented">
-              <button class="active" type="button" data-factor-target="assets">聚合多标的指标卡</button>
-              <button type="button" data-factor-target="sensitivity">参数高原测试</button>
-              <button type="button" data-factor-target="stress">压力测试报告</button>
-              <button type="button" data-factor-target="trades">详细成交历史</button>
-            </div>
-            <div class="factor-panel active" data-factor-panel="assets">
+              <div id="dataSourceCards" class="source-grid"></div>
+            </section>
+            <section class="surface-panel">
+              <h2>回测结果历史</h2>
               <div class="table-wrap">
-                <h3>多标的横向测试</h3>
-                <table>
+                <table class="result-history-table">
                   <thead>
                     <tr>
-                      <th>标的</th>
-                      <th>板块</th>
+                      <th>结果ID</th>
+                      <th>创建时间</th>
+                      <th>引擎</th>
                       <th>收益</th>
-                      <th>最大回撤</th>
-                      <th>胜率</th>
-                      <th>交易</th>
                     </tr>
                   </thead>
-                  <tbody id="assetRows"></tbody>
+                  <tbody id="resultHistoryRows"></tbody>
                 </table>
               </div>
-            </div>
-            <div class="factor-panel" data-factor-panel="sensitivity">
-              <h3>参数敏感度</h3>
-              <div id="sensitivityBars" class="bars"></div>
-            </div>
-            <div class="factor-panel" data-factor-panel="stress">
-              <h3>压力测试</h3>
-              <div id="stressList" class="stress-list"></div>
-            </div>
-            <div class="factor-panel" data-factor-panel="trades">
-              <h3>详细成交历史</h3>
-              <div class="empty-panel">成交明细将随 Paper 订单在这里滚动展示。</div>
-            </div>
-          </section>
-        </div>
-      </section>
-
-      <section class="page" id="paperOrdersPage" aria-labelledby="paperOrdersTitle">
-        <div class="surface-panel">
-          <div class="section-head">
-            <div>
-              <span class="eyebrow">Paper Execution</span>
-              <h2 id="paperOrdersTitle">Paper订单</h2>
-            </div>
-            <div class="mode-pill">paper_only=true</div>
+            </section>
           </div>
-          <div class="table-wrap">
-            <table class="paper-orders-table">
-              <thead>
-                <tr>
-                  <th>标的</th>
-                  <th>方向</th>
-                  <th>信号</th>
-                  <th>状态</th>
-                  <th>原因</th>
-                </tr>
-              </thead>
-              <tbody id="paperOrderRows"></tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <section class="page" id="dataResultsPage" aria-labelledby="dataResultsTitle">
-        <div class="split-grid">
-          <section class="surface-panel">
-            <div class="section-head">
-              <div>
-                <span class="eyebrow">Sources</span>
-                <h2 id="dataResultsTitle">数据与结果</h2>
-              </div>
-            </div>
-            <div id="dataSourceCards" class="source-grid"></div>
-          </section>
-          <section class="surface-panel">
-            <h2>回测结果历史</h2>
-            <div class="table-wrap">
-              <table class="result-history-table">
-                <thead>
-                  <tr>
-                    <th>结果ID</th>
-                    <th>创建时间</th>
-                    <th>引擎</th>
-                    <th>收益</th>
-                  </tr>
-                </thead>
-                <tbody id="resultHistoryRows"></tbody>
-              </table>
-            </div>
-          </section>
-        </div>
-      </section>
-    </main>
+        </section>
+      </main>
+    </section>
 
     <aside class="knowledge-card" id="knowledgeCard" aria-label="金融概念说明">
       <button class="knowledge-toggle" type="button" id="knowledgeToggle">金融概念逐字说明</button>
