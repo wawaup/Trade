@@ -4,11 +4,35 @@ from pathlib import Path
 
 from tradebot.allocation import allocation_config_from_dict, allocation_config_to_dict, build_allocations, default_allocation_config
 from tradebot.dashboard import build_dashboard_state
+from tradebot.data_sources import DataSourceFactory
+from tradebot.execution import PaperAccount
 
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = ROOT / "web"
 ALLOCATION_CONFIG = default_allocation_config()
+PAPER_ACCOUNT = PaperAccount(cash=10_000.0)
+PAPER_ORDER_LOG = []
+BACKTEST_RESULTS = []
+
+
+def build_data_sources_response():
+    return 200, {"sources": DataSourceFactory.list_sources()}
+
+
+def build_paper_orders_response():
+    return 200, {
+        "account": {
+            "paperOnly": True,
+            "cash": PAPER_ACCOUNT.cash,
+            "positions": PAPER_ACCOUNT.positions,
+        },
+        "orders": PAPER_ORDER_LOG,
+    }
+
+
+def build_backtest_results_response():
+    return 200, {"results": BACKTEST_RESULTS[-20:]}
 
 
 def allocation_rows_to_dict(config):
@@ -59,6 +83,33 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/state":
             payload = json.dumps(build_dashboard_state(allocation_config=ALLOCATION_CONFIG), ensure_ascii=False).encode("utf-8")
             self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if self.path == "/api/data-sources":
+            status, body = build_data_sources_response()
+            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if self.path == "/api/paper/orders":
+            status, body = build_paper_orders_response()
+            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if self.path == "/api/backtest/results":
+            status, body = build_backtest_results_response()
+            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
