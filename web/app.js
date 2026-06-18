@@ -1,5 +1,6 @@
 const fmtPct = (value) => `${(value * 100).toFixed(2)}%`;
 const fmtMoney = (value) => value ? `$${value.toFixed(2)}` : "-";
+let latestAllocation = null;
 
 function switchPage(targetId) {
   document.querySelectorAll(".page").forEach((page) => {
@@ -102,6 +103,8 @@ function renderLive(live) {
       <td>${row.status}</td>
       <td>${fmtMoney(row.lastPrice)}</td>
       <td>${row.layers}</td>
+      <td>${fmtMoney(row.symbolBudget)}</td>
+      <td>${fmtMoney(row.tBudget)}</td>
       <td class="${row.spreadPct > 0.005 ? "negative" : ""}">${fmtPct(row.spreadPct)}</td>
       <td class="${row.risk === "正常" ? "positive" : "warning"}">${row.risk}</td>
     </tr>
@@ -109,6 +112,55 @@ function renderLive(live) {
   document.getElementById("guardrails").innerHTML = live.guardrails.map((item) => `<li>${item}</li>`).join("");
   document.getElementById("terminalLog").textContent = live.logs.join("\n");
 }
+
+function renderAllocationForm(allocation) {
+  latestAllocation = allocation;
+  document.getElementById("totalAccountQuote").value = allocation.totalAccountQuote;
+  document.getElementById("allocationRows").innerHTML = allocation.symbols.map((row) => `
+    <div class="allocation-row" data-symbol="${row.symbol}">
+      <strong>${row.symbol}</strong>
+      <label>
+        <span>总仓位%</span>
+        <input name="totalPct" type="number" min="0" max="100" step="1" value="${(row.totalPct * 100).toFixed(0)}">
+      </label>
+      <label>
+        <span>T仓%</span>
+        <input name="tPct" type="number" min="0" max="100" step="1" value="${(row.tPct * 100).toFixed(0)}">
+      </label>
+    </div>
+  `).join("");
+}
+
+async function saveAllocation(event) {
+  event.preventDefault();
+  const symbols = Array.from(document.querySelectorAll(".allocation-row")).map((row) => ({
+    symbol: row.dataset.symbol,
+    totalPct: Number(row.querySelector("[name='totalPct']").value) / 100,
+    tPct: Number(row.querySelector("[name='tPct']").value) / 100,
+  }));
+  const payload = {
+    totalAccountQuote: Number(document.getElementById("totalAccountQuote").value),
+    symbols,
+  };
+  const response = await fetch("/api/allocation", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json();
+  const message = document.getElementById("allocationMessage");
+  if (!response.ok) {
+    message.textContent = `保存失败：${body.error}`;
+    message.className = "form-message negative";
+    return;
+  }
+  latestAllocation = body.allocation;
+  message.textContent = "仓位比例已保存";
+  message.className = "form-message positive";
+  await refreshState();
+}
+
+document.getElementById("allocationForm").addEventListener("submit", saveAllocation);
 
 async function refreshState() {
   try {
@@ -120,6 +172,7 @@ async function refreshState() {
     renderSensitivity(state.backtest.sensitivity);
     renderStress(state.backtest.stress);
     renderLive(state.live);
+    renderAllocationForm(state.allocation);
     document.getElementById("connectionStatus").textContent = "已连接";
     document.getElementById("updatedAt").textContent = new Date().toLocaleTimeString("zh-CN");
   } catch (error) {

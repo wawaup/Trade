@@ -10,8 +10,10 @@ class DashboardTest(unittest.TestCase):
         self.assertIn("backtest", state)
         self.assertIn("live", state)
         self.assertIn("glossary", state)
+        self.assertIn("allocation", state)
         self.assertGreaterEqual(len(state["backtest"]["assets"]), 3)
         self.assertIn("当前实盘交易", state["live"]["title"])
+        self.assertIn("tBudget", state["live"]["positions"][0])
 
     def test_glossary_is_chinese_first_for_beginners(self):
         state = build_dashboard_state(seed=12)

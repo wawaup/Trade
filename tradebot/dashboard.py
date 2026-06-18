@@ -1,9 +1,15 @@
+from typing import Optional
+
+from tradebot.allocation import AllocationConfig, allocation_config_to_dict, build_allocations, default_allocation_config
 from tradebot.metrics import calculate_metrics
 from tradebot.research import build_synthetic_universe, run_multi_asset_research, run_parameter_sensitivity, run_stress_suite
 from tradebot.terminal_log import format_signal_log
 
 
-def build_dashboard_state(seed: int = 7) -> dict:
+def build_dashboard_state(seed: int = 7, allocation_config: Optional[AllocationConfig] = None) -> dict:
+    allocation_config = allocation_config or default_allocation_config()
+    allocation_rows = build_allocations(allocation_config)
+    allocation_by_symbol = {row.symbol: row for row in allocation_rows}
     profiles = build_synthetic_universe(seed)
     multi = run_multi_asset_research(profiles, starting_quote=15_000, global_t_max_exposure_pct=0.30, seed=seed)
     sensitivity = run_parameter_sensitivity([0.006, 0.007, 0.008, 0.009, 0.010], seed)
@@ -26,6 +32,7 @@ def build_dashboard_state(seed: int = 7) -> dict:
             }
         )
         latest_trade = row.result.trades[-1] if row.result.trades else None
+        allocation = allocation_by_symbol.get(row.symbol)
         live_positions.append(
             {
                 "symbol": row.symbol,
@@ -33,6 +40,11 @@ def build_dashboard_state(seed: int = 7) -> dict:
                 "lastPrice": latest_trade.price if latest_trade else 0,
                 "layers": 1 if latest_trade and latest_trade.side == "BUY" else 0,
                 "tExposure": row.result.t_position_value,
+                "symbolBudget": allocation.symbol_budget if allocation else 0,
+                "coreBudget": allocation.core_budget if allocation else 0,
+                "tBudget": allocation.t_budget if allocation else 0,
+                "symbolPct": allocation.total_pct if allocation else 0,
+                "tPct": allocation.t_pct if allocation else 0,
                 "spreadPct": _spread_pct_for_symbol(row.symbol),
                 "risk": _risk_label(row.metrics.max_drawdown_pct),
             }
@@ -56,6 +68,18 @@ def build_dashboard_state(seed: int = 7) -> dict:
     aggregate_metrics = calculate_metrics(aggregate_start, aggregate_curve, aggregate_pnls)
 
     return {
+        "allocation": allocation_config_to_dict(allocation_config),
+        "allocationRows": [
+            {
+                "symbol": row.symbol,
+                "totalPct": row.total_pct,
+                "tPct": row.t_pct,
+                "symbolBudget": row.symbol_budget,
+                "coreBudget": row.core_budget,
+                "tBudget": row.t_budget,
+            }
+            for row in allocation_rows
+        ],
         "backtest": {
             "title": "策略历史回测",
             "summary": {

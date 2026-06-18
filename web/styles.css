@@ -206,7 +206,7 @@ td { font-size: 0.92rem; }
   background: var(--green);
 }
 
-.stress-item, .guardrails li {
+.stress-item, .guardrails li, .allocation-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -217,6 +217,64 @@ td { font-size: 0.92rem; }
 .guardrails {
   margin: 0 0 var(--space-xl);
   padding: 0;
+}
+
+.allocation-panel {
+  margin-bottom: var(--space-xl);
+}
+
+.field, .allocation-row label {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.field {
+  margin-bottom: var(--space-md);
+}
+
+.field span, .allocation-row span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.field input, .allocation-row input {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 0 var(--space-sm);
+}
+
+.allocation-rows {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.allocation-row {
+  display: grid;
+  grid-template-columns: 64px 1fr 1fr;
+  align-items: end;
+  gap: var(--space-sm);
+}
+
+.save-button {
+  width: 100%;
+  min-height: 40px;
+  margin-top: var(--space-md);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-3);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.form-message {
+  min-height: 20px;
+  margin-top: var(--space-sm);
+  color: var(--muted);
+  font-size: 0.86rem;
 }
 
 .mode-pill {

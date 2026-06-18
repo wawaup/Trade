@@ -18,6 +18,9 @@ class FrontendFilesTest(unittest.TestCase):
         self.assertIn("knowledgeCard", html)
         self.assertLess(html.index("top-page-nav"), html.index("status-strip"))
         self.assertNotIn("<details", html)
+        self.assertIn("仓位分配设置", html)
+        self.assertIn("allocationForm", html)
+        self.assertIn("totalAccountQuote", html)
 
     def test_frontend_script_polls_live_state(self):
         js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
@@ -28,6 +31,9 @@ class FrontendFilesTest(unittest.TestCase):
         self.assertIn("toggleKnowledgeCard", js)
         self.assertIn("collapseKnowledgeCard", js)
         self.assertIn("contains(event.target)", js)
+        self.assertIn("/api/allocation", js)
+        self.assertIn("renderAllocationForm", js)
+        self.assertIn("saveAllocation", js)
 
     def test_docker_service_files_exist(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")

@@ -81,6 +81,8 @@
                   <th>状态</th>
                   <th>最新价</th>
                   <th>T层数</th>
+                  <th>总预算</th>
+                  <th>T预算</th>
                   <th>点差</th>
                   <th>风险</th>
                 </tr>
@@ -89,6 +91,18 @@
             </table>
           </div>
           <div>
+            <section class="allocation-panel">
+              <h3>仓位分配设置</h3>
+              <form id="allocationForm">
+                <label class="field">
+                  <span>币安总账户金额 USDT/USDC</span>
+                  <input id="totalAccountQuote" name="totalAccountQuote" type="number" min="1" step="100">
+                </label>
+                <div id="allocationRows" class="allocation-rows"></div>
+                <button class="save-button" type="submit">保存仓位比例</button>
+                <p id="allocationMessage" class="form-message"></p>
+              </form>
+            </section>
             <h3>保护规则</h3>
             <ul id="guardrails" class="guardrails"></ul>
             <h3>Terminal 风格执行 Log</h3>
