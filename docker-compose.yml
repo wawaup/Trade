@@ -1,0 +1,7 @@
+services:
+  tradebot-dashboard:
+    build: .
+    container_name: tradebot-dashboard
+    ports:
+      - "8765:8765"
+    restart: unless-stopped

@@ -102,12 +102,12 @@ def build_dashboard_state(seed: int = 7) -> dict:
 
 def glossary_items() -> list[dict]:
     return [
-        {"term": "VWAP / 成交量加权均价", "body": "按成交量加权后的平均价格。做T时用它判断当前价格是否偏离日内公平价。"},
-        {"term": "ATR / 平均真实波幅", "body": "衡量最近波动幅度。ATR越高，做T空间越大，但风险也越高。"},
-        {"term": "bps / 基点", "body": "1 bps 等于 0.01%。30 bps 就是 0.30%，常用于滑点、点差和手续费。"},
-        {"term": "Max Drawdown / 最大回撤", "body": "资金曲线从高点到低点的最大跌幅，是衡量最痛亏损的重要指标。"},
+        {"term": "VWAP / Volume Weighted Average Price / 成交量加权均价", "body": "按成交量加权后的平均价格。做T时用它判断当前价格是否偏离日内公平价。"},
+        {"term": "ATR / Average True Range / 平均真实波幅", "body": "衡量最近波动幅度。ATR越高，做T空间越大，但风险也越高。"},
+        {"term": "bps / basis points / 基点", "body": "1 bps 等于 0.01%。30 bps 就是 0.30%，常用于滑点、点差和手续费。"},
+        {"term": "MDD / Maximum Drawdown / 最大回撤", "body": "资金曲线从高点到低点的最大跌幅，是衡量最痛亏损的重要指标。"},
         {"term": "Profit Factor / 盈亏比", "body": "总盈利除以总亏损。大于1说明盈利交易覆盖了亏损交易。"},
-        {"term": "Sharpe / 夏普比率", "body": "衡量单位波动带来的收益。它不是越高越一定安全，但能帮助比较策略质量。"},
+        {"term": "Sharpe Ratio / 夏普比率", "body": "衡量单位波动带来的收益。它不是越高越一定安全，但能帮助比较策略质量。"},
         {"term": "T仓 / Trading Bucket", "body": "专门用于日内或波段高抛低吸的仓位，和长期核心仓分开管理。"},
     ]
 
@@ -126,4 +126,3 @@ def _risk_label(max_drawdown_pct: float) -> str:
     if max_drawdown_pct <= -0.08:
         return "警戒"
     return "正常"
-

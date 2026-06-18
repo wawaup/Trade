@@ -14,6 +14,23 @@ document.querySelectorAll("[data-page-target]").forEach((button) => {
   button.addEventListener("click", () => switchPage(button.dataset.pageTarget));
 });
 
+function toggleKnowledgeCard() {
+  document.getElementById("knowledgeCard").classList.toggle("collapsed");
+}
+
+document.getElementById("knowledgeToggle").addEventListener("click", toggleKnowledgeCard);
+
+function collapseKnowledgeCard() {
+  document.getElementById("knowledgeCard").classList.add("collapsed");
+}
+
+document.addEventListener("click", (event) => {
+  const card = document.getElementById("knowledgeCard");
+  if (!card.contains(event.target)) {
+    collapseKnowledgeCard();
+  }
+});
+
 function clsFor(value) {
   if (value < 0) return "negative";
   if (value > 0) return "positive";
@@ -23,10 +40,10 @@ function clsFor(value) {
 function renderGlossary(items) {
   const root = document.getElementById("glossary");
   root.innerHTML = items.map((item, idx) => `
-    <details ${idx === 0 ? "open" : ""}>
-      <summary>${item.term}</summary>
+    <article class="knowledge-item">
+      <div class="knowledge-term">${idx + 1}. ${item.term}</div>
       <p>${item.body}</p>
-    </details>
+    </article>
   `).join("");
 }
 

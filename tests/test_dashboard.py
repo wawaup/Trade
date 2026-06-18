@@ -17,8 +17,10 @@ class DashboardTest(unittest.TestCase):
         state = build_dashboard_state(seed=12)
         terms = [item["term"] for item in state["glossary"]]
 
-        self.assertIn("VWAP / 成交量加权均价", terms)
-        self.assertIn("Max Drawdown / 最大回撤", terms)
+        self.assertIn("VWAP / Volume Weighted Average Price / 成交量加权均价", terms)
+        self.assertIn("ATR / Average True Range / 平均真实波幅", terms)
+        self.assertIn("bps / basis points / 基点", terms)
+        self.assertIn("MDD / Maximum Drawdown / 最大回撤", terms)
 
 
 if __name__ == "__main__":
