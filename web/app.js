@@ -6,12 +6,16 @@ let backtestChart = null;
 let liveChart = null;
 
 function switchPage(targetId) {
-  document.querySelectorAll(".page").forEach((page) => {
+  document.querySelectorAll(".page, .qd-page").forEach((page) => {
     page.classList.toggle("active", page.id === targetId);
   });
   document.querySelectorAll("[data-page-target]").forEach((button) => {
     button.classList.toggle("active", button.dataset.pageTarget === targetId);
   });
+}
+
+function switchWorkspace(targetId) {
+  switchPage(targetId);
 }
 
 function toggleKnowledgeCard(event) {
@@ -51,6 +55,7 @@ function renderSummary(summary) {
   root.innerHTML = metrics.map(([label, value]) => `
     <div class="metric"><span>${label}</span><strong>${value}</strong></div>
   `).join("");
+  renderStrategyPerformance(summary);
 }
 
 function renderAssets(assets) {
@@ -100,10 +105,13 @@ function renderDataSources(payload) {
 }
 
 function renderPaperOrders(payload) {
-  const root = document.getElementById("paperOrderRows");
-  if (!root) return;
+  const roots = [
+    document.getElementById("paperOrderRows"),
+    document.getElementById("paperOrderRowsFull"),
+  ].filter(Boolean);
+  if (!roots.length) return;
   const orders = payload.orders || [];
-  root.innerHTML = orders.length ? orders.map((order) => `
+  const html = orders.length ? orders.map((order) => `
     <tr>
       <td>${order.symbol || "-"}</td>
       <td>${order.side || "-"}</td>
@@ -112,6 +120,46 @@ function renderPaperOrders(payload) {
       <td>${order.reason || "-"}</td>
     </tr>
   `).join("") : `<tr><td colspan="5">暂无 Paper 订单。</td></tr>`;
+  roots.forEach((root) => { root.innerHTML = html; });
+}
+
+function renderQuickTradeAccount(payload) {
+  const account = payload.account || {};
+  const priceBox = document.querySelector(".qd-price-box");
+  if (!priceBox) return;
+  const positions = Object.keys(account.positions || {});
+  priceBox.innerHTML = `
+    <strong>${positions[0] || "NVDA"}</strong>
+    <span>${fmtMoney(account.cash || 0)}</span>
+  `;
+}
+
+function renderStrategyList(live) {
+  const list = document.querySelector(".qd-strategy-list");
+  if (!list || !live.positions) return;
+  const header = list.querySelector(".section-head")?.outerHTML || "";
+  const rows = live.positions.map((row, index) => `
+    <div class="qd-strategy-group ${index === 0 ? "active" : ""}">
+      <span>Trade T Bucket</span>
+      <strong>${row.symbol}</strong>
+      <em>${row.status} · ${row.layers} layers · spread ${fmtPct(row.spreadPct)}</em>
+    </div>
+  `).join("");
+  list.innerHTML = header + rows;
+}
+
+function renderStrategyPerformance(summary = {}) {
+  const root = document.getElementById("strategyPerformance");
+  if (!root) return;
+  const metrics = [
+    ["Total Return", fmtPct(summary.totalReturnPct || 0), "positive"],
+    ["Max Drawdown", fmtPct(summary.maxDrawdownPct || 0), "warning"],
+    ["Win Rate", fmtPct(summary.winRate || 0), ""],
+    ["Profit Factor", Number.isFinite(summary.profitFactor) ? summary.profitFactor.toFixed(2) : "-", ""],
+  ];
+  root.innerHTML = metrics.map(([label, value, cls]) => `
+    <div class="metric"><span>${label}</span><strong class="${cls}">${value}</strong></div>
+  `).join("");
 }
 
 function renderResultHistory(payload) {
@@ -225,6 +273,7 @@ function renderLive(live) {
   term.textContent = live.logs.join("\n");
   term.scrollTop = term.scrollHeight;
   renderRiskLights(live);
+  renderStrategyList(live);
 }
 
 function renderAllocationForm(allocation) {
@@ -403,14 +452,16 @@ async function loadPlatformData() {
     fetch("/api/paper/orders"),
     fetch("/api/backtest/results"),
   ]);
+  const paperPayload = await paperRes.json();
   renderDataSources(await sourcesRes.json());
-  renderPaperOrders(await paperRes.json());
+  renderPaperOrders(paperPayload);
+  renderQuickTradeAccount(paperPayload);
   renderResultHistory(await resultsRes.json());
 }
 
 async function boot() {
   document.querySelectorAll("[data-page-target]").forEach((button) => {
-    button.addEventListener("click", () => switchPage(button.dataset.pageTarget));
+    button.addEventListener("click", () => switchWorkspace(button.dataset.pageTarget));
   });
   document.getElementById("knowledgeToggle").addEventListener("click", toggleKnowledgeCard);
   document.addEventListener("click", (event) => {

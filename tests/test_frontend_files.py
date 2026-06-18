@@ -71,6 +71,15 @@ class FrontendFilesTest(unittest.TestCase):
         self.assertIn("function renderPaperOrders", js)
         self.assertIn("function renderDataSources", js)
 
+    def test_quantdinger_shell_javascript_bindings_exist(self):
+        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("function switchWorkspace", js)
+        self.assertIn("function renderStrategyList", js)
+        self.assertIn("function renderQuickTradeAccount", js)
+        self.assertIn("function renderStrategyPerformance", js)
+        self.assertIn("paperOrderRowsFull", js)
+
     def test_docker_service_files_exist(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
