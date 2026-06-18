@@ -1,6 +1,7 @@
 import unittest
 
 from tradebot.backtest import BacktestConfig, run_backtest
+from tradebot.data import generate_synthetic_spcx
 from tradebot.models import Candle
 from tradebot.strategy import StrategyConfig
 
@@ -59,6 +60,16 @@ class BacktestTest(unittest.TestCase):
 
         buys = [trade for trade in result.trades if trade.side == "BUY"]
         self.assertEqual(len(buys), 1)
+
+    def test_backtest_result_exposes_platform_contract_fields(self):
+        daily, intraday = generate_synthetic_spcx()
+        result = run_backtest(daily, intraday, BacktestConfig(), StrategyConfig())
+        self.assertTrue(result.result_id.startswith("bt_"))
+        self.assertEqual(result.engine_version, "tradebot-backtest-v2")
+        self.assertIn("fillTiming", result.execution_assumptions)
+        self.assertIn("slippageBps", result.config_snapshot)
+        self.assertIsInstance(result.order_intents, list)
+        self.assertIsInstance(result.risk_events, list)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import hashlib
+import json
 
 from tradebot.fees import BinanceStockFeeModel
 from tradebot.market_quality import MarketQuality, market_quality_allows_trade
@@ -27,6 +29,12 @@ class BacktestResult:
     trades: list[Trade]
     equity_curve: list[float]
     trade_pnls: list[float]
+    result_id: str = ""
+    engine_version: str = "tradebot-backtest-v2"
+    config_snapshot: dict = field(default_factory=dict)
+    execution_assumptions: dict = field(default_factory=dict)
+    order_intents: list = field(default_factory=list)
+    risk_events: list = field(default_factory=list)
 
 
 def run_backtest(
@@ -114,6 +122,23 @@ def run_backtest(
     last_price = intraday[-1].close if intraday else 0.0
     t_position_value = t_qty * last_price
     ending_equity = cash + t_position_value
+    config_snapshot = {
+        "startingQuote": backtest_config.starting_quote,
+        "coreAllocationPct": backtest_config.core_allocation_pct,
+        "slippageBps": backtest_config.slippage_bps,
+        "syntheticSpreadBps": backtest_config.synthetic_spread_bps,
+        "maxSpreadPct": backtest_config.max_spread_pct,
+        "strategy": strategy_config.__dict__,
+    }
+    execution_assumptions = {
+        "fillTiming": "modeled_current_close",
+        "feeModel": "BinanceStockFeeModel",
+        "paperOnly": True,
+        "engineVersion": "tradebot-backtest-v2",
+    }
+    result_hash = hashlib.sha1(
+        json.dumps(config_snapshot, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:12]
 
     return BacktestResult(
         starting_quote=backtest_config.starting_quote,
@@ -126,4 +151,10 @@ def run_backtest(
         trades=trades,
         equity_curve=equity_curve,
         trade_pnls=trade_pnls,
+        result_id=f"bt_{result_hash}",
+        engine_version="tradebot-backtest-v2",
+        config_snapshot=config_snapshot,
+        execution_assumptions=execution_assumptions,
+        order_intents=[],
+        risk_events=[],
     )
