@@ -18,6 +18,9 @@ def build_parser() -> argparse.ArgumentParser:
     simulate = subparsers.add_parser("simulate", help="Run a synthetic SPCX-like simulation.")
     simulate.add_argument("--starting-quote", type=float, default=3500)
     simulate.add_argument("--core-allocation-pct", type=float, default=0.70)
+    simulate.add_argument("--slippage-bps", type=float, default=30)
+    simulate.add_argument("--synthetic-spread-bps", type=float, default=20)
+    simulate.add_argument("--max-spread-pct", type=float, default=0.005)
     simulate.add_argument("--seed", type=int, default=7)
 
     fetch = subparsers.add_parser("fetch-binance", help="Fetch Binance spot klines to CSV.")
@@ -31,6 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--intraday", required=True)
     backtest.add_argument("--starting-quote", type=float, default=3500)
     backtest.add_argument("--core-allocation-pct", type=float, default=0.70)
+    backtest.add_argument("--slippage-bps", type=float, default=30)
+    backtest.add_argument("--synthetic-spread-bps", type=float, default=20)
+    backtest.add_argument("--max-spread-pct", type=float, default=0.005)
 
     return parser
 
@@ -60,7 +66,13 @@ def main() -> None:
         result = run_backtest(
             daily,
             intraday,
-            BacktestConfig(args.starting_quote, args.core_allocation_pct),
+            BacktestConfig(
+                args.starting_quote,
+                args.core_allocation_pct,
+                args.slippage_bps,
+                args.synthetic_spread_bps,
+                args.max_spread_pct,
+            ),
             StrategyConfig(),
         )
         print_result(result)
@@ -74,7 +86,13 @@ def main() -> None:
         result = run_backtest(
             daily,
             intraday,
-            BacktestConfig(args.starting_quote, args.core_allocation_pct),
+            BacktestConfig(
+                args.starting_quote,
+                args.core_allocation_pct,
+                args.slippage_bps,
+                args.synthetic_spread_bps,
+                args.max_spread_pct,
+            ),
             StrategyConfig(),
         )
         print_result(result)
@@ -82,4 +100,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

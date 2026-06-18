@@ -11,6 +11,8 @@ from tradebot.models import Candle
 
 
 BINANCE_REST_BASE = "https://api.binance.com"
+DAY_MS = 86_400_000
+HOUR_MS = 3_600_000
 
 
 def parse_binance_kline(row: list) -> Candle:
@@ -33,6 +35,18 @@ def fetch_spot_klines(symbol: str, interval: str, limit: int = 500) -> list[Cand
     with urllib.request.urlopen(url, timeout=20) as response:
         data = json.loads(response.read().decode("utf-8"))
     return [parse_binance_kline(row) for row in data]
+
+
+def session_start_ms(timestamp_ms: int, reset_utc_hour: int = 8) -> int:
+    if not 0 <= reset_utc_hour <= 23:
+        raise ValueError("reset_utc_hour must be in 0..23")
+    reset_offset = reset_utc_hour * HOUR_MS
+    return ((timestamp_ms - reset_offset) // DAY_MS) * DAY_MS + reset_offset
+
+
+def candles_for_session(candles: list[Candle], timestamp_ms: int, reset_utc_hour: int = 8) -> list[Candle]:
+    start = session_start_ms(timestamp_ms, reset_utc_hour)
+    return [c for c in candles if c.open_time >= start and c.open_time <= timestamp_ms]
 
 
 def write_candles_csv(path: Path, candles: list[Candle]) -> None:

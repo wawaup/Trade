@@ -8,7 +8,10 @@ It models:
 - Intraday trigger: buy a pullback after price reclaims VWAP.
 - T bucket risk: core long allocation is separated from the tradable T bucket.
 - Fee friction: below 350 USD uses 0.35 USD fixed fee, otherwise 0.1%.
-- Slippage: default 8 bps per fill.
+- Conservative friction: default 30 bps slippage, 20 bps synthetic spread, and
+  spread rejection above 0.5%.
+- Risk filters: neutral-range T mode, momentum half-size entries, dynamic take
+  profit by layer count, and extreme 1-minute move rejection.
 
 This is not financial advice and is not a live trading bot. Use it to validate
 rules before connecting any real account.
@@ -22,7 +25,7 @@ python3 -m unittest discover -s tests
 ## Synthetic Simulation
 
 ```bash
-python3 -m tradebot.cli simulate --starting-quote 3500 --core-allocation-pct 0.70
+python3 -m tradebot.cli simulate --starting-quote 3500 --core-allocation-pct 0.70 --slippage-bps 30
 ```
 
 ## Fetch Binance Klines
@@ -53,7 +56,8 @@ python3 -m tradebot.cli backtest-csv --daily data/daily.csv --intraday data/intr
 - 日内触发：价格回踩后重新站上 VWAP 才买入。
 - T 仓风险控制：长期核心仓和可交易 T 仓分开管理。
 - 手续费摩擦：350 USD 以下按 0.35 USD 固定费估算，否则按 0.1%。
-- 滑点：默认每次成交 8 bps。
+- 保守交易摩擦：默认每次成交 30 bps 滑点、20 bps 合成点差，并在点差超过 0.5% 时拒绝成交。
+- 风险过滤：支持 neutral 震荡做 T、强势半仓追随、按持仓层数动态止盈、1分钟极端波动拒绝接单。
 
 这不是投资建议，也不是实盘交易机器人。它的用途是在连接真实账户之前，先验证规则、手续费、滑点和仓位逻辑。
 
@@ -66,7 +70,7 @@ python3 -m unittest discover -s tests
 ## 运行合成行情模拟
 
 ```bash
-python3 -m tradebot.cli simulate --starting-quote 3500 --core-allocation-pct 0.70
+python3 -m tradebot.cli simulate --starting-quote 3500 --core-allocation-pct 0.70 --slippage-bps 30
 ```
 
 ## 获取 Binance K 线
