@@ -24,73 +24,105 @@
     </header>
 
     <main class="workspace">
-      <section class="panel page active" id="backtestPage" aria-labelledby="backtestTitle">
-        <div class="section-head">
-          <div>
-            <span class="eyebrow">Research</span>
+      <section class="page active" id="backtestPage" aria-labelledby="backtestTitle">
+        <div class="research-lab-layout">
+          <aside class="strategy-control-panel surface-panel">
+            <span class="eyebrow">Control</span>
             <h2 id="backtestTitle">策略历史回测</h2>
-          </div>
-          <div class="segmented">
-            <button class="active" type="button">多标的</button>
-            <button type="button">参数高原</button>
-            <button type="button">压力测试</button>
-          </div>
-        </div>
-        <div class="metric-grid" id="backtestSummary"></div>
-        <div class="split-grid">
-          <div class="table-wrap">
-            <h3>多标的横向测试</h3>
-            <table>
-              <thead>
-                <tr>
-                  <th>标的</th>
-                  <th>板块</th>
-                  <th>收益</th>
-                  <th>最大回撤</th>
-                  <th>胜率</th>
-                  <th>交易</th>
-                </tr>
-              </thead>
-              <tbody id="assetRows"></tbody>
-            </table>
-          </div>
-          <div class="chart-panel">
-            <h3>参数敏感度</h3>
-            <div id="sensitivityBars" class="bars"></div>
-            <h3>压力测试</h3>
-            <div id="stressList" class="stress-list"></div>
-          </div>
+            <section>
+              <h3>选择标的</h3>
+              <div class="symbol-checks">
+                <label><input type="checkbox" checked> SPCX</label>
+                <label><input type="checkbox" checked> TSLA</label>
+                <label><input type="checkbox" checked> NVDA</label>
+                <label><input type="checkbox" checked> MU</label>
+                <label><input type="checkbox" checked> CPOX</label>
+              </div>
+            </section>
+            <section>
+              <h3>样本切分</h3>
+              <div class="segmented full">
+                <button class="active" type="button">In-Sample</button>
+                <button type="button">Out-of-Sample</button>
+              </div>
+            </section>
+            <section>
+              <h3>摩擦参数</h3>
+              <label class="field"><span>滑点 bps</span><input value="30" readonly></label>
+              <label class="field"><span>点差 bps</span><input value="20" readonly></label>
+            </section>
+            <div class="metric-grid compact" id="backtestSummary"></div>
+          </aside>
+
+          <section class="quant-workspace">
+            <div class="surface-panel chart-hero">
+              <div class="section-head">
+                <div>
+                  <span class="eyebrow">Chart</span>
+                  <h2>K线 / VWAP 主视窗</h2>
+                </div>
+                <div class="mode-pill">模拟K线</div>
+              </div>
+              <div class="chart-placeholder" id="backtestChart">
+                <div class="chart-gridline"></div>
+                <div class="chart-vwap-line"></div>
+                <div class="chart-candles"></div>
+              </div>
+            </div>
+            <div class="surface-panel nav-curve-panel">
+              <div class="section-head">
+                <h3>NAV Curve / 净资产权益曲线</h3>
+                <span class="eyebrow">Core vs T Bucket</span>
+              </div>
+              <div class="equity-line" id="equityLine"></div>
+            </div>
+          </section>
+
+          <section class="factor-tabs surface-panel">
+            <div class="segmented">
+              <button class="active" type="button">聚合多标的指标卡</button>
+              <button type="button">参数高原测试</button>
+              <button type="button">压力测试报告</button>
+              <button type="button">详细成交历史</button>
+            </div>
+            <div class="factor-grid">
+              <div class="table-wrap">
+                <h3>多标的横向测试</h3>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>标的</th>
+                      <th>板块</th>
+                      <th>收益</th>
+                      <th>最大回撤</th>
+                      <th>胜率</th>
+                      <th>交易</th>
+                    </tr>
+                  </thead>
+                  <tbody id="assetRows"></tbody>
+                </table>
+              </div>
+              <div>
+                <h3>参数敏感度</h3>
+                <div id="sensitivityBars" class="bars"></div>
+                <h3>压力测试</h3>
+                <div id="stressList" class="stress-list"></div>
+              </div>
+            </div>
+          </section>
         </div>
       </section>
 
-      <section class="panel page" id="livePage" aria-labelledby="liveTitle">
-        <div class="section-head">
-          <div>
-            <span class="eyebrow">Trading</span>
-            <h2 id="liveTitle">当前实盘交易</h2>
-          </div>
-          <div class="mode-pill" id="tradeMode">模拟监控</div>
-        </div>
-        <div class="split-grid live-grid">
-          <div class="table-wrap">
-            <h3>实时持仓与风控</h3>
-            <table>
-              <thead>
-                <tr>
-                  <th>标的</th>
-                  <th>状态</th>
-                  <th>最新价</th>
-                  <th>T层数</th>
-                  <th>总预算</th>
-                  <th>T预算</th>
-                  <th>点差</th>
-                  <th>风险</th>
-                </tr>
-              </thead>
-              <tbody id="liveRows"></tbody>
-            </table>
-          </div>
-          <div>
+      <section class="page" id="livePage" aria-labelledby="liveTitle">
+        <div class="live-trading-layout">
+          <aside class="live-left-panel surface-panel">
+            <div class="section-head">
+              <div>
+                <span class="eyebrow">Trading</span>
+                <h2 id="liveTitle">当前实盘交易</h2>
+              </div>
+              <div class="mode-pill" id="tradeMode">模拟监控</div>
+            </div>
             <section class="allocation-panel">
               <h3>仓位分配设置</h3>
               <form id="allocationForm">
@@ -103,11 +135,50 @@
                 <p id="allocationMessage" class="form-message"></p>
               </form>
             </section>
-            <h3>保护规则</h3>
-            <ul id="guardrails" class="guardrails"></ul>
+            <div class="table-wrap">
+              <h3>实时持仓与风控</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th>标的</th>
+                    <th>状态</th>
+                    <th>最新价</th>
+                    <th>T层数</th>
+                    <th>总预算</th>
+                    <th>T预算</th>
+                    <th>点差</th>
+                    <th>风险</th>
+                  </tr>
+                </thead>
+                <tbody id="liveRows"></tbody>
+              </table>
+            </div>
+          </aside>
+
+          <section class="live-center-panel surface-panel">
+            <div class="section-head">
+              <div>
+                <span class="eyebrow">Realtime</span>
+                <h2>日内 1m 图 / Avg Entry 线</h2>
+              </div>
+              <div class="mode-pill">VWAP overlay</div>
+            </div>
+            <div class="chart-placeholder live-chart" id="liveChart">
+              <div class="chart-gridline"></div>
+              <div class="chart-vwap-line"></div>
+              <div class="chart-entry-line"></div>
+              <div class="chart-candles"></div>
+            </div>
             <h3>Terminal 风格执行 Log</h3>
             <pre id="terminalLog" class="terminal"></pre>
-          </div>
+          </section>
+
+          <aside class="live-right-panel surface-panel">
+            <h2>风控指示灯</h2>
+            <div id="riskLights" class="risk-lights"></div>
+            <h3>保护规则</h3>
+            <ul id="guardrails" class="guardrails"></ul>
+          </aside>
         </div>
       </section>
     </main>

@@ -21,6 +21,16 @@ class FrontendFilesTest(unittest.TestCase):
         self.assertIn("仓位分配设置", html)
         self.assertIn("allocationForm", html)
         self.assertIn("totalAccountQuote", html)
+        self.assertIn("research-lab-layout", html)
+        self.assertIn("strategy-control-panel", html)
+        self.assertIn("quant-workspace", html)
+        self.assertIn("factor-tabs", html)
+        self.assertIn("live-trading-layout", html)
+        self.assertIn("live-left-panel", html)
+        self.assertIn("live-center-panel", html)
+        self.assertIn("live-right-panel", html)
+        self.assertIn("K线 / VWAP 主视窗", html)
+        self.assertIn("风控指示灯", html)
 
     def test_frontend_script_polls_live_state(self):
         js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
@@ -34,6 +44,8 @@ class FrontendFilesTest(unittest.TestCase):
         self.assertIn("/api/allocation", js)
         self.assertIn("renderAllocationForm", js)
         self.assertIn("saveAllocation", js)
+        self.assertIn("renderRiskLights", js)
+        self.assertIn("renderChartPlaceholder", js)
 
     def test_docker_service_files_exist(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")

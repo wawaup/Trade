@@ -95,6 +95,28 @@ function renderStress(rows) {
   `).join("");
 }
 
+function renderRiskLights(live) {
+  const safeSpread = live.positions.every((row) => row.spreadPct <= 0.005);
+  const activeT = live.positions.some((row) => row.layers > 0);
+  const items = [
+    ["点差过滤", safeSpread ? "SAFE" : "WIDE SPREAD", safeSpread ? "" : "warn"],
+    ["插针保护", "READY", ""],
+    ["全局T仓", activeT ? "ACTIVE" : "IDLE", activeT ? "warn" : ""],
+    ["虚拟钱包", "ISOLATED", ""],
+  ];
+  document.getElementById("riskLights").innerHTML = items.map(([label, status, cls]) => `
+    <div class="risk-light ${cls}">
+      <strong>${label}</strong>
+      <span>${status}</span>
+    </div>
+  `).join("");
+}
+
+function renderChartPlaceholder() {
+  document.getElementById("backtestChart").dataset.ready = "true";
+  document.getElementById("liveChart").dataset.ready = "true";
+}
+
 function renderLive(live) {
   document.getElementById("tradeMode").textContent = live.mode;
   document.getElementById("liveRows").innerHTML = live.positions.map((row) => `
@@ -111,6 +133,7 @@ function renderLive(live) {
   `).join("");
   document.getElementById("guardrails").innerHTML = live.guardrails.map((item) => `<li>${item}</li>`).join("");
   document.getElementById("terminalLog").textContent = live.logs.join("\n");
+  renderRiskLights(live);
 }
 
 function renderAllocationForm(allocation) {
@@ -173,6 +196,7 @@ async function refreshState() {
     renderStress(state.backtest.stress);
     renderLive(state.live);
     renderAllocationForm(state.allocation);
+    renderChartPlaceholder();
     document.getElementById("connectionStatus").textContent = "已连接";
     document.getElementById("updatedAt").textContent = new Date().toLocaleTimeString("zh-CN");
   } catch (error) {
