@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tradebot 实时交易监控</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="glossary-panel">
+      <div class="brand-block">
+        <span class="eyebrow">Tradebot</span>
+        <h1>交易阶段监控台</h1>
+      </div>
+      <section>
+        <h2>金融概念逐字说明</h2>
+        <div id="glossary"></div>
+      </section>
+      <nav class="page-nav" aria-label="主视图切换">
+        <button class="active" type="button" data-page-target="backtestPage">策略历史回测</button>
+        <button type="button" data-page-target="livePage">当前实盘交易</button>
+      </nav>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <span class="eyebrow">Binance Stock Token Desk</span>
+          <h2>策略验证与实盘观察</h2>
+        </div>
+        <div class="status-strip">
+          <span id="connectionStatus">连接中</span>
+          <span id="updatedAt">--</span>
+        </div>
+      </header>
+
+      <section class="panel page active" id="backtestPage" aria-labelledby="backtestTitle">
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Research</span>
+            <h3 id="backtestTitle">策略历史回测</h3>
+          </div>
+          <div class="segmented">
+            <button class="active" type="button">多标的</button>
+            <button type="button">参数高原</button>
+            <button type="button">压力测试</button>
+          </div>
+        </div>
+        <div class="metric-grid" id="backtestSummary"></div>
+        <div class="split-grid">
+          <div class="table-wrap">
+            <h4>多标的横向测试</h4>
+            <table>
+              <thead>
+                <tr>
+                  <th>标的</th>
+                  <th>板块</th>
+                  <th>收益</th>
+                  <th>最大回撤</th>
+                  <th>胜率</th>
+                  <th>交易</th>
+                </tr>
+              </thead>
+              <tbody id="assetRows"></tbody>
+            </table>
+          </div>
+          <div class="chart-panel">
+            <h4>参数敏感度</h4>
+            <div id="sensitivityBars" class="bars"></div>
+            <h4>压力测试</h4>
+            <div id="stressList" class="stress-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel page" id="livePage" aria-labelledby="liveTitle">
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Trading</span>
+            <h3 id="liveTitle">当前实盘交易</h3>
+          </div>
+          <div class="mode-pill" id="tradeMode">模拟监控</div>
+        </div>
+        <div class="split-grid live-grid">
+          <div class="table-wrap">
+            <h4>实时持仓与风控</h4>
+            <table>
+              <thead>
+                <tr>
+                  <th>标的</th>
+                  <th>状态</th>
+                  <th>最新价</th>
+                  <th>T层数</th>
+                  <th>点差</th>
+                  <th>风险</th>
+                </tr>
+              </thead>
+              <tbody id="liveRows"></tbody>
+            </table>
+          </div>
+          <div>
+            <h4>保护规则</h4>
+            <ul id="guardrails" class="guardrails"></ul>
+            <h4>Terminal 风格执行 Log</h4>
+            <pre id="terminalLog" class="terminal"></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="./app.js"></script>
+</body>
+</html>

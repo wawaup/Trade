@@ -9,6 +9,7 @@ from tradebot.data import (
     write_candles_csv,
 )
 from tradebot.strategy import StrategyConfig
+from tradebot.server import run_server
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--slippage-bps", type=float, default=30)
     backtest.add_argument("--synthetic-spread-bps", type=float, default=20)
     backtest.add_argument("--max-spread-pct", type=float, default=0.005)
+
+    dashboard = subparsers.add_parser("dashboard", help="Run realtime dashboard web UI.")
+    dashboard.add_argument("--host", default="127.0.0.1")
+    dashboard.add_argument("--port", type=int, default=8765)
 
     return parser
 
@@ -96,6 +101,8 @@ def main() -> None:
             StrategyConfig(),
         )
         print_result(result)
+    elif args.command == "dashboard":
+        run_server(args.host, args.port)
 
 
 if __name__ == "__main__":

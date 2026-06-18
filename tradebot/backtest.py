@@ -25,6 +25,8 @@ class BacktestResult:
     max_t_position_quote: float
     fees_paid: float
     trades: list[Trade]
+    equity_curve: list[float]
+    trade_pnls: list[float]
 
 
 def run_backtest(
@@ -42,6 +44,8 @@ def run_backtest(
     max_t_position_quote = 0.0
     fees_paid = 0.0
     trades: list[Trade] = []
+    equity_curve: list[float] = [cash]
+    trade_pnls: list[float] = []
     layers = 0
 
     for idx in range(2, len(intraday) + 1):
@@ -93,8 +97,10 @@ def run_backtest(
             fill_price = current.close * (1 - backtest_config.slippage_bps / 10_000)
             gross = t_qty * fill_price
             fee = fees.estimate(gross)
+            pnl = gross - fee - t_cost
             cash += gross - fee
             fees_paid += fee
+            trade_pnls.append(pnl)
             trades.append(
                 Trade("SELL", current.open_time, fill_price, t_qty, gross, fee, signal.reason)
             )
@@ -102,6 +108,8 @@ def run_backtest(
             t_cost = 0.0
             last_buy_price = None
             layers = 0
+
+        equity_curve.append(cash + t_qty * current.close)
 
     last_price = intraday[-1].close if intraday else 0.0
     t_position_value = t_qty * last_price
@@ -116,4 +124,6 @@ def run_backtest(
         max_t_position_quote=max_t_position_quote,
         fees_paid=fees_paid,
         trades=trades,
+        equity_curve=equity_curve,
+        trade_pnls=trade_pnls,
     )
