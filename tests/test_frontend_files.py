@@ -101,6 +101,14 @@ class FrontendFilesTest(unittest.TestCase):
         self.assertIn(".risk-light.danger", css)
         self.assertIn(".field input.error", css)
 
+    def test_platform_styles_define_new_surfaces(self):
+        css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn(".platform-layout", css)
+        self.assertIn(".source-card", css)
+        self.assertIn(".paper-orders-table", css)
+        self.assertIn(".result-history-table", css)
+
 
 if __name__ == "__main__":
     unittest.main()

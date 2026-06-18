@@ -65,9 +65,9 @@ h3 { margin-bottom: var(--space-md); font-size: 0.95rem; color: var(--muted); }
 
 .top-page-nav {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
   gap: var(--space-sm);
-  min-width: 360px;
+  min-width: min(620px, 48vw);
 }
 
 .top-page-nav button {
@@ -97,6 +97,10 @@ h3 { margin-bottom: var(--space-md); font-size: 0.95rem; color: var(--muted); }
   padding: var(--space-xl);
   display: grid;
   gap: var(--space-xl);
+}
+
+.platform-layout {
+  align-items: start;
 }
 
 .surface-panel {
@@ -140,11 +144,8 @@ h3 { margin-bottom: var(--space-md); font-size: 0.95rem; color: var(--muted); }
   gap: var(--space-xl);
 }
 
-.factor-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
-  gap: var(--space-xl);
-}
+.factor-panel { display: none; }
+.factor-panel.active { display: grid; gap: var(--space-lg); }
 
 .live-trading-layout {
   display: grid;
@@ -223,12 +224,44 @@ h3 { margin-bottom: var(--space-md); font-size: 0.95rem; color: var(--muted); }
   gap: var(--space-xl);
 }
 
+.source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-md);
+}
+
+.source-card {
+  display: grid;
+  gap: var(--space-sm);
+  min-height: 112px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: var(--space-lg);
+}
+
+.source-card strong {
+  color: var(--text);
+  font-size: 1.08rem;
+}
+
+.source-card span {
+  color: var(--muted);
+}
+
+.source-card em {
+  align-self: end;
+  color: var(--blue);
+  font-style: normal;
+  font-size: 0.82rem;
+}
+
 .chart-hero,
 .nav-curve-panel {
   display: grid;
 }
 
-.chart-placeholder {
+.chart-container {
   position: relative;
   min-height: 300px;
   border: 1px solid var(--line);
@@ -241,33 +274,12 @@ h3 { margin-bottom: var(--space-md); font-size: 0.95rem; color: var(--muted); }
   overflow: hidden;
 }
 
-.chart-vwap-line,
-.chart-entry-line,
 .equity-line {
   position: absolute;
   left: 5%;
   right: 5%;
   height: 2px;
   border-radius: 999px;
-}
-
-.chart-vwap-line {
-  top: 48%;
-  background: var(--blue);
-}
-
-.chart-entry-line {
-  top: 62%;
-  background: var(--amber);
-}
-
-.chart-candles {
-  position: absolute;
-  inset: 12% 5%;
-  background:
-    linear-gradient(90deg, transparent 0 4%, var(--green) 4% 5%, transparent 5% 8%, var(--red) 8% 9%, transparent 9% 12%),
-    linear-gradient(0deg, transparent 0 42%, color-mix(in oklch, var(--green), transparent 25%) 42% 58%, transparent 58%);
-  opacity: 0.82;
 }
 
 .nav-curve-panel {
@@ -291,6 +303,16 @@ table {
   width: 100%;
   border-collapse: collapse;
   min-width: 620px;
+}
+
+.paper-orders-table,
+.result-history-table {
+  min-width: 720px;
+}
+
+.paper-orders-table td:last-child,
+.result-history-table td:nth-child(2) {
+  color: var(--muted);
 }
 
 th, td {
@@ -374,6 +396,11 @@ td { font-size: 0.92rem; }
   padding: 0 var(--space-sm);
 }
 
+.field input.error, .allocation-row input.error {
+  border-color: var(--red);
+  box-shadow: 0 0 0 3px oklch(0.68 0.15 25 / 0.18);
+}
+
 .allocation-rows {
   display: grid;
   gap: var(--space-sm);
@@ -448,6 +475,29 @@ td { font-size: 0.92rem; }
 
 .risk-light.warn span {
   color: var(--amber);
+}
+
+@keyframes pulse-danger {
+  0% { box-shadow: 0 0 0 0 oklch(0.68 0.15 25 / 0.42); }
+  70% { box-shadow: 0 0 0 8px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+.risk-light.danger {
+  border-color: var(--red);
+  animation: pulse-danger 1.5s infinite;
+}
+
+.risk-light.danger span {
+  color: var(--red);
+}
+
+.empty-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  padding: var(--space-lg);
 }
 
 .knowledge-card {
@@ -534,6 +584,7 @@ td { font-size: 0.92rem; }
     grid-template-columns: 1fr;
   }
   .top-page-nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     min-width: 0;
     width: 100%;
   }
@@ -542,7 +593,6 @@ td { font-size: 0.92rem; }
   }
   .split-grid,
   .research-lab-layout,
-  .factor-grid,
   .live-trading-layout {
     grid-template-columns: 1fr;
     grid-template-areas: none;
@@ -565,6 +615,9 @@ td { font-size: 0.92rem; }
   .segmented {
     width: 100%;
     overflow-x: auto;
+  }
+  .top-page-nav {
+    grid-template-columns: 1fr;
   }
   .knowledge-card {
     left: var(--space-lg);
