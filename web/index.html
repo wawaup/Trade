@@ -3,19 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Tradebot 实时交易监控</title>
+  <title>Trade Quant Research Desk</title>
   <link rel="stylesheet" href="./styles.css">
+  <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
   <div class="shell">
     <header class="topbar">
       <nav class="top-page-nav" aria-label="主视图切换">
-        <button class="active" type="button" data-page-target="backtestPage">策略历史回测</button>
-        <button type="button" data-page-target="livePage">当前实盘交易</button>
+        <button class="active" type="button" data-page-target="researchPage">研究仪表盘</button>
+        <button type="button" data-page-target="backtestPage">策略回测</button>
+        <button type="button" data-page-target="paperOrdersPage">Paper订单</button>
+        <button type="button" data-page-target="dataResultsPage">数据与结果</button>
       </nav>
       <div>
-        <span class="eyebrow">Tradebot · Binance Stock Token Desk</span>
-        <h1>交易阶段监控台</h1>
+        <span class="eyebrow">Trade · QuantDinger Thin Platform</span>
+        <h1>量化研究与纸面执行工作台</h1>
       </div>
       <div class="status-strip">
         <span id="connectionStatus">连接中</span>
@@ -23,103 +26,14 @@
       </div>
     </header>
 
-    <main class="workspace">
-      <section class="page active" id="backtestPage" aria-labelledby="backtestTitle">
-        <div class="research-lab-layout">
-          <aside class="strategy-control-panel surface-panel">
-            <span class="eyebrow">Control</span>
-            <h2 id="backtestTitle">策略历史回测</h2>
-            <section>
-              <h3>选择标的</h3>
-              <div class="symbol-checks">
-                <label><input type="checkbox" checked> SPCX</label>
-                <label><input type="checkbox" checked> TSLA</label>
-                <label><input type="checkbox" checked> NVDA</label>
-                <label><input type="checkbox" checked> MU</label>
-                <label><input type="checkbox" checked> CPOX</label>
-              </div>
-            </section>
-            <section>
-              <h3>样本切分</h3>
-              <div class="segmented full">
-                <button class="active" type="button">In-Sample</button>
-                <button type="button">Out-of-Sample</button>
-              </div>
-            </section>
-            <section>
-              <h3>摩擦参数</h3>
-              <label class="field"><span>滑点 bps</span><input value="30" readonly></label>
-              <label class="field"><span>点差 bps</span><input value="20" readonly></label>
-            </section>
-            <div class="metric-grid compact" id="backtestSummary"></div>
-          </aside>
-
-          <section class="quant-workspace">
-            <div class="surface-panel chart-hero">
-              <div class="section-head">
-                <div>
-                  <span class="eyebrow">Chart</span>
-                  <h2>K线 / VWAP 主视窗</h2>
-                </div>
-                <div class="mode-pill">模拟K线</div>
-              </div>
-              <div class="chart-placeholder" id="backtestChart">
-                <div class="chart-gridline"></div>
-                <div class="chart-vwap-line"></div>
-                <div class="chart-candles"></div>
-              </div>
-            </div>
-            <div class="surface-panel nav-curve-panel">
-              <div class="section-head">
-                <h3>NAV Curve / 净资产权益曲线</h3>
-                <span class="eyebrow">Core vs T Bucket</span>
-              </div>
-              <div class="equity-line" id="equityLine"></div>
-            </div>
-          </section>
-
-          <section class="factor-tabs surface-panel">
-            <div class="segmented">
-              <button class="active" type="button">聚合多标的指标卡</button>
-              <button type="button">参数高原测试</button>
-              <button type="button">压力测试报告</button>
-              <button type="button">详细成交历史</button>
-            </div>
-            <div class="factor-grid">
-              <div class="table-wrap">
-                <h3>多标的横向测试</h3>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>标的</th>
-                      <th>板块</th>
-                      <th>收益</th>
-                      <th>最大回撤</th>
-                      <th>胜率</th>
-                      <th>交易</th>
-                    </tr>
-                  </thead>
-                  <tbody id="assetRows"></tbody>
-                </table>
-              </div>
-              <div>
-                <h3>参数敏感度</h3>
-                <div id="sensitivityBars" class="bars"></div>
-                <h3>压力测试</h3>
-                <div id="stressList" class="stress-list"></div>
-              </div>
-            </div>
-          </section>
-        </div>
-      </section>
-
-      <section class="page" id="livePage" aria-labelledby="liveTitle">
+    <main class="workspace platform-layout">
+      <section class="page active" id="researchPage" aria-labelledby="researchTitle">
         <div class="live-trading-layout">
           <aside class="live-left-panel surface-panel">
             <div class="section-head">
               <div>
-                <span class="eyebrow">Trading</span>
-                <h2 id="liveTitle">当前实盘交易</h2>
+                <span class="eyebrow">Research</span>
+                <h2 id="researchTitle">研究仪表盘</h2>
               </div>
               <div class="mode-pill" id="tradeMode">模拟监控</div>
             </div>
@@ -163,12 +77,7 @@
               </div>
               <div class="mode-pill">VWAP overlay</div>
             </div>
-            <div class="chart-placeholder live-chart" id="liveChart">
-              <div class="chart-gridline"></div>
-              <div class="chart-vwap-line"></div>
-              <div class="chart-entry-line"></div>
-              <div class="chart-candles"></div>
-            </div>
+            <div class="chart-container live-chart" id="liveChart"></div>
             <h3>Terminal 风格执行 Log</h3>
             <pre id="terminalLog" class="terminal"></pre>
           </section>
@@ -179,6 +88,154 @@
             <h3>保护规则</h3>
             <ul id="guardrails" class="guardrails"></ul>
           </aside>
+        </div>
+      </section>
+
+      <section class="page" id="backtestPage" aria-labelledby="backtestTitle">
+        <div class="research-lab-layout">
+          <aside class="strategy-control-panel surface-panel">
+            <span class="eyebrow">Control</span>
+            <h2 id="backtestTitle">策略回测</h2>
+            <section>
+              <h3>选择标的</h3>
+              <div class="symbol-checks">
+                <label><input type="checkbox" name="backtestSymbol" value="SPCX" checked> SPCX</label>
+                <label><input type="checkbox" name="backtestSymbol" value="TSLA" checked> TSLA</label>
+                <label><input type="checkbox" name="backtestSymbol" value="NVDA" checked> NVDA</label>
+                <label><input type="checkbox" name="backtestSymbol" value="MU" checked> MU</label>
+                <label><input type="checkbox" name="backtestSymbol" value="CPOX" checked> CPOX</label>
+              </div>
+            </section>
+            <section>
+              <h3>样本切分</h3>
+              <div class="segmented full" id="sampleSplit">
+                <button class="active" type="button" data-sample="in">In-Sample</button>
+                <button type="button" data-sample="out">Out-of-Sample</button>
+              </div>
+            </section>
+            <section>
+              <h3>摩擦参数</h3>
+              <label class="field"><span>滑点 bps</span><input id="slippageBps" type="number" min="0" max="200" step="1" value="30"></label>
+              <label class="field"><span>点差 bps</span><input id="spreadBps" type="number" min="0" max="200" step="1" value="20"></label>
+            </section>
+            <button class="save-button" type="button" id="runBacktestButton">运行回测</button>
+            <div class="metric-grid compact" id="backtestSummary"></div>
+          </aside>
+
+          <section class="quant-workspace">
+            <div class="surface-panel chart-hero">
+              <div class="section-head">
+                <div>
+                  <span class="eyebrow">Chart</span>
+                  <h2>K线 / VWAP 主视窗</h2>
+                </div>
+                <div class="mode-pill">模拟K线</div>
+              </div>
+              <div class="chart-container" id="backtestChart"></div>
+            </div>
+            <div class="surface-panel nav-curve-panel">
+              <div class="section-head">
+                <h3>NAV Curve / 净资产权益曲线</h3>
+                <span class="eyebrow">Core vs T Bucket</span>
+              </div>
+              <div class="equity-line" id="equityLine"></div>
+            </div>
+          </section>
+
+          <section class="factor-tabs surface-panel">
+            <div class="segmented">
+              <button class="active" type="button" data-factor-target="assets">聚合多标的指标卡</button>
+              <button type="button" data-factor-target="sensitivity">参数高原测试</button>
+              <button type="button" data-factor-target="stress">压力测试报告</button>
+              <button type="button" data-factor-target="trades">详细成交历史</button>
+            </div>
+            <div class="factor-panel active" data-factor-panel="assets">
+              <div class="table-wrap">
+                <h3>多标的横向测试</h3>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>标的</th>
+                      <th>板块</th>
+                      <th>收益</th>
+                      <th>最大回撤</th>
+                      <th>胜率</th>
+                      <th>交易</th>
+                    </tr>
+                  </thead>
+                  <tbody id="assetRows"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="factor-panel" data-factor-panel="sensitivity">
+              <h3>参数敏感度</h3>
+              <div id="sensitivityBars" class="bars"></div>
+            </div>
+            <div class="factor-panel" data-factor-panel="stress">
+              <h3>压力测试</h3>
+              <div id="stressList" class="stress-list"></div>
+            </div>
+            <div class="factor-panel" data-factor-panel="trades">
+              <h3>详细成交历史</h3>
+              <div class="empty-panel">成交明细将随 Paper 订单在这里滚动展示。</div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page" id="paperOrdersPage" aria-labelledby="paperOrdersTitle">
+        <div class="surface-panel">
+          <div class="section-head">
+            <div>
+              <span class="eyebrow">Paper Execution</span>
+              <h2 id="paperOrdersTitle">Paper订单</h2>
+            </div>
+            <div class="mode-pill">paper_only=true</div>
+          </div>
+          <div class="table-wrap">
+            <table class="paper-orders-table">
+              <thead>
+                <tr>
+                  <th>标的</th>
+                  <th>方向</th>
+                  <th>信号</th>
+                  <th>状态</th>
+                  <th>原因</th>
+                </tr>
+              </thead>
+              <tbody id="paperOrderRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="page" id="dataResultsPage" aria-labelledby="dataResultsTitle">
+        <div class="split-grid">
+          <section class="surface-panel">
+            <div class="section-head">
+              <div>
+                <span class="eyebrow">Sources</span>
+                <h2 id="dataResultsTitle">数据与结果</h2>
+              </div>
+            </div>
+            <div id="dataSourceCards" class="source-grid"></div>
+          </section>
+          <section class="surface-panel">
+            <h2>回测结果历史</h2>
+            <div class="table-wrap">
+              <table class="result-history-table">
+                <thead>
+                  <tr>
+                    <th>结果ID</th>
+                    <th>创建时间</th>
+                    <th>引擎</th>
+                    <th>收益</th>
+                  </tr>
+                </thead>
+                <tbody id="resultHistoryRows"></tbody>
+              </table>
+            </div>
+          </section>
         </div>
       </section>
     </main>

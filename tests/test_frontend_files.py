@@ -6,14 +6,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FrontendFilesTest(unittest.TestCase):
-    def test_frontend_page_has_two_main_sections_and_glossary(self):
+    def test_frontend_page_has_platform_sections_and_glossary(self):
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
-        self.assertIn("策略历史回测", html)
-        self.assertIn("当前实盘交易", html)
+        self.assertIn("研究仪表盘", html)
+        self.assertIn("策略回测", html)
+        self.assertIn("Paper订单", html)
+        self.assertIn("数据与结果", html)
         self.assertIn("金融概念逐字说明", html)
+        self.assertIn('id="researchPage"', html)
+        self.assertIn('id="backtestPage"', html)
+        self.assertIn('id="paperOrdersPage"', html)
+        self.assertIn('id="dataResultsPage"', html)
+        self.assertIn('data-page-target="researchPage"', html)
         self.assertIn('data-page-target="backtestPage"', html)
-        self.assertIn('data-page-target="livePage"', html)
+        self.assertIn('data-page-target="paperOrdersPage"', html)
+        self.assertIn('data-page-target="dataResultsPage"', html)
         self.assertIn("top-page-nav", html)
         self.assertIn("knowledgeCard", html)
         self.assertLess(html.index("top-page-nav"), html.index("status-strip"))
@@ -31,6 +39,14 @@ class FrontendFilesTest(unittest.TestCase):
         self.assertIn("live-right-panel", html)
         self.assertIn("K线 / VWAP 主视窗", html)
         self.assertIn("风控指示灯", html)
+        self.assertIn("lightweight-charts", html)
+        self.assertNotIn("chart-candles", html)
+        self.assertIn("data-factor-panel=\"assets\"", html)
+        self.assertIn("data-factor-panel=\"sensitivity\"", html)
+        self.assertIn("data-factor-panel=\"stress\"", html)
+        self.assertIn('tbody id="paperOrderRows"', html)
+        self.assertIn('tbody id="resultHistoryRows"', html)
+        self.assertIn('id="dataSourceCards"', html)
 
     def test_frontend_script_polls_live_state(self):
         js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
@@ -46,6 +62,15 @@ class FrontendFilesTest(unittest.TestCase):
         self.assertIn("saveAllocation", js)
         self.assertIn("renderRiskLights", js)
         self.assertIn("renderChartPlaceholder", js)
+        self.assertIn("/api/state/static", js)
+        self.assertIn("/api/state/live", js)
+        self.assertIn("/api/backtest/run", js)
+        self.assertIn("/api/klines", js)
+        self.assertIn("initTradingChart", js)
+        self.assertIn("runBacktestFromControls", js)
+        self.assertIn("switchFactorTab", js)
+        self.assertIn("validateAllocationForm", js)
+        self.assertIn("scrollTop = term.scrollHeight", js)
 
     def test_docker_service_files_exist(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
@@ -63,6 +88,9 @@ class FrontendFilesTest(unittest.TestCase):
         self.assertNotIn("right: var(--space-xl)", css)
         self.assertIn("scrollbar-color", css)
         self.assertIn(".knowledge-body::-webkit-scrollbar-thumb", css)
+        self.assertIn("@keyframes pulse-danger", css)
+        self.assertIn(".risk-light.danger", css)
+        self.assertIn(".field input.error", css)
 
 
 if __name__ == "__main__":
