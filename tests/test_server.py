@@ -2,6 +2,9 @@ import json
 import unittest
 
 from tradebot.server import (
+    BACKTEST_RESULTS,
+    build_backtest_response,
+    build_backtest_results_response,
     build_config_response,
     build_data_sources_response,
     build_paper_orders_response,
@@ -9,6 +12,9 @@ from tradebot.server import (
 
 
 class ServerTest(unittest.TestCase):
+    def tearDown(self):
+        BACKTEST_RESULTS.clear()
+
     def test_build_config_response_accepts_allocation_payload(self):
         payload = {
             "totalAccountQuote": 10_000,
@@ -36,6 +42,24 @@ class ServerTest(unittest.TestCase):
         self.assertIn("orders", body)
         self.assertIn("account", body)
         self.assertTrue(body["account"]["paperOnly"])
+
+    def test_backtest_run_records_result_history(self):
+        BACKTEST_RESULTS.clear()
+
+        status, body = build_backtest_response(json.dumps({"symbols": ["NVDA"]}).encode("utf-8"))
+        history_status, history = build_backtest_results_response()
+
+        self.assertEqual(status, 200)
+        self.assertIn("backtest", body)
+        self.assertEqual(history_status, 200)
+        self.assertEqual(len(BACKTEST_RESULTS), 1)
+        self.assertEqual(len(history["results"]), 1)
+        result = history["results"][0]
+        self.assertIn("resultId", result)
+        self.assertIn("createdAt", result)
+        self.assertIn("summary", result)
+        self.assertIn("engineVersion", result)
+        self.assertEqual(result["summary"], body["backtest"]["summary"])
 
 
 if __name__ == "__main__":
