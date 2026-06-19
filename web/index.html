@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Trade QuantDinger Desk</title>
-  <link rel="stylesheet" href="./styles.css?v=20260619-layout">
+  <title>Trade 量化工作台</title>
+  <link rel="stylesheet" href="./styles.css?v=20260619-cn-actions">
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -12,27 +12,26 @@
     <aside class="qd-sidebar" aria-label="Trade 主导航">
       <div class="qd-brand">
         <div class="qd-mark">T</div>
-        <strong>TradeDinger</strong>
+        <strong>Trade 量化</strong>
       </div>
       <nav class="qd-nav">
-        <button type="button" data-page-target="indicatorIdePage" class="active">Indicator IDE</button>
-        <button type="button" data-page-target="strategyLivePage">Strategy &amp; Live</button>
-        <button type="button" data-page-target="paperOrdersPage">Trading Bot</button>
-        <button type="button" data-page-target="dataResultsPage">Data / Results</button>
+        <button type="button" data-page-target="indicatorIdePage" class="active">IDE 指标开发</button>
+        <button type="button" data-page-target="strategyLivePage">策略与实盘监控</button>
+        <button type="button" data-page-target="paperOrdersPage">Paper 订单</button>
+        <button type="button" data-page-target="dataResultsPage">数据与结果</button>
       </nav>
       <div class="qd-sidebar-footer">
-        <span>CONTACT US</span>
-        <a href="#">Support</a>
-        <a href="#">Feature request</a>
-        <small>Paper-only workspace</small>
+        <span>本地研究模式</span>
+        <small>仅模拟盘，不连接实盘交易所</small>
+        <small>策略信号先进入 Paper 订单</small>
       </div>
     </aside>
 
     <section class="qd-main">
       <header class="qd-topbar">
         <div class="qd-top-actions">
-          <button type="button" aria-label="菜单">☰</button>
-          <button type="button" aria-label="刷新">↻</button>
+          <button type="button" id="menuButton" aria-label="菜单" title="收起/展开主导航">☰</button>
+          <button type="button" id="refreshButton" aria-label="刷新数据" title="刷新数据">↻</button>
         </div>
         <div class="qd-status-strip">
           <span id="connectionStatus">连接中</span>
@@ -47,10 +46,10 @@
             <aside class="qd-code-panel">
               <div class="qd-panel-head">
                 <div>
-                  <span class="eyebrow">Code Editor</span>
-                  <h2 id="indicatorIdeTitle">T Strategy Script</h2>
+                  <span class="eyebrow">IDE 代码编辑器</span>
+                  <h2 id="indicatorIdeTitle">T 策略脚本</h2>
                 </div>
-                <button type="button">Purchased</button>
+                <button type="button" disabled aria-disabled="true">脚本编辑暂未开放</button>
               </div>
               <pre class="qd-code-slab"><code>my_indicator_name = "Trade T Bucket"
 my_indicator_description = "VWAP grid T strategy"
@@ -84,23 +83,23 @@ order_intent = signal_to_order_intent(
             <section class="qd-market-stage">
               <div class="qd-control-strip">
                 <div class="qd-select-pack">
-                  <span>WATCHLIST</span>
+                  <span>WATCHLIST 观察池</span>
                   <strong>NVDA / TSLA / SPCX</strong>
                 </div>
                 <div class="qd-timeframe">
-                  <button type="button">1m</button>
-                  <button type="button">5m</button>
-                  <button type="button">15m</button>
-                  <button class="active" type="button">1H</button>
-                  <button type="button">1D</button>
+                  <button type="button" data-resolution="1m">1m</button>
+                  <button type="button" data-resolution="5m">5m</button>
+                  <button type="button" data-resolution="15m">15m</button>
+                  <button class="active" type="button" data-resolution="1h">1H</button>
+                  <button type="button" data-resolution="1d">1D</button>
                 </div>
-                <button class="qd-primary" type="button" id="runBacktestButton">Run Backtest</button>
+                <button class="qd-primary" type="button" id="runBacktestButton">运行回测</button>
               </div>
 
               <section class="qd-chart-card">
                 <div class="section-head">
                   <div>
-                    <span class="eyebrow">Chart</span>
+                    <span class="eyebrow">Chart 图表</span>
                     <h2>K线 / VWAP 主视窗</h2>
                   </div>
                   <div class="mode-pill">EMA / VWAP / T buckets</div>
@@ -110,12 +109,12 @@ order_intent = signal_to_order_intent(
 
               <section class="qd-backtest-params">
                 <div class="section-head">
-                  <h3>Backtest Parameters</h3>
-                  <span class="mode-pill">current close fills</span>
+                  <h3>回测参数</h3>
+                  <span class="mode-pill">当前收盘价成交</span>
                 </div>
                 <div class="qd-param-grid">
                   <div>
-                    <h4>Symbols</h4>
+                    <h4>Symbols 标的</h4>
                     <div class="symbol-checks">
                       <label><input type="checkbox" name="backtestSymbol" value="SPCX" checked> SPCX</label>
                       <label><input type="checkbox" name="backtestSymbol" value="TSLA" checked> TSLA</label>
@@ -125,14 +124,14 @@ order_intent = signal_to_order_intent(
                     </div>
                   </div>
                   <div>
-                    <h4>Sample</h4>
+                    <h4>样本区间</h4>
                     <div class="segmented full" id="sampleSplit">
-                      <button class="active" type="button" data-sample="in">In-Sample</button>
-                      <button type="button" data-sample="out">Out-of-Sample</button>
+                      <button class="active" type="button" data-sample="in">样本内</button>
+                      <button type="button" data-sample="out">样本外</button>
                     </div>
                   </div>
                   <div>
-                    <h4>Friction</h4>
+                    <h4>交易摩擦</h4>
                     <label class="field"><span>滑点 bps</span><input id="slippageBps" type="number" min="0" max="200" step="1" value="30"></label>
                     <label class="field"><span>点差 bps</span><input id="spreadBps" type="number" min="0" max="200" step="1" value="20"></label>
                   </div>
@@ -141,10 +140,10 @@ order_intent = signal_to_order_intent(
 
               <section class="qd-results-tabs">
                 <div class="segmented">
-                  <button class="active" type="button" data-factor-target="assets">Backtest Results</button>
-                  <button type="button" data-factor-target="sensitivity">Smart Tuning</button>
-                  <button type="button" data-factor-target="stress">Stress</button>
-                  <button type="button" data-factor-target="trades">Trades</button>
+                  <button class="active" type="button" data-factor-target="assets">回测结果</button>
+                  <button type="button" data-factor-target="sensitivity">智能调参</button>
+                  <button type="button" data-factor-target="stress">压力测试</button>
+                  <button type="button" data-factor-target="trades">成交明细</button>
                 </div>
                 <div class="factor-panel active" data-factor-panel="assets">
                   <div class="metric-grid" id="backtestSummary"></div>
@@ -181,7 +180,7 @@ order_intent = signal_to_order_intent(
             <aside class="qd-quick-trade">
               <div class="qd-panel-head">
                 <div>
-                  <span class="eyebrow">Quick Trade</span>
+                  <span class="eyebrow">Quick Trade 快速模拟</span>
                   <h2>Paper订单</h2>
                 </div>
                 <span class="mode-pill">SAFE</span>
@@ -191,19 +190,20 @@ order_intent = signal_to_order_intent(
                 <span>$72,726</span>
               </div>
               <div class="qd-side-buttons">
-                <button class="long" type="button">Long</button>
-                <button class="short" type="button">Short</button>
+                <button class="long" type="button" data-paper-side="buy">买入做T</button>
+                <button class="short" type="button" data-paper-side="sell">卖出减T</button>
               </div>
               <div class="qd-order-form">
-                <label class="field"><span>Amount (USDT)</span><input type="number" value="350"></label>
+                <label class="field"><span>Amount 下单金额 (USDT)</span><input id="paperOrderAmount" type="number" min="1" step="10" value="350"></label>
                 <div class="segmented full">
-                  <button class="active" type="button">Market</button>
-                  <button type="button">Limit</button>
+                  <button class="active" type="button" data-order-type="market">市价单</button>
+                  <button type="button" data-order-type="limit" disabled aria-disabled="true">限价单（暂未开放）</button>
                 </div>
+                <p id="paperOrderMessage" class="form-message"></p>
               </div>
               <h3>风控指示灯</h3>
               <div id="riskLights" class="risk-lights"></div>
-              <h3>Paper order log</h3>
+              <h3>Paper 订单日志</h3>
               <div class="table-wrap compact-table">
                 <table class="paper-orders-table">
                   <tbody id="paperOrderRows"></tbody>
@@ -217,23 +217,23 @@ order_intent = signal_to_order_intent(
           <div class="qd-live-grid">
             <aside class="qd-strategy-list">
               <div class="section-head">
-                <h2 id="strategyLiveTitle">Strategy List</h2>
-                <button class="qd-primary" type="button">Create Strategy</button>
+                <h2 id="strategyLiveTitle">策略列表</h2>
+                <button class="qd-primary" type="button" disabled aria-disabled="true">创建策略（暂未开放）</button>
               </div>
               <div class="qd-strategy-group active">
                 <span>11222</span>
                 <strong>11222-SOL/USDT</strong>
-                <em>Running · 1m · Bitget</em>
+                <em>运行中 · 1m · Bitget</em>
               </div>
               <div class="qd-strategy-group">
                 <span>Trade T Bucket</span>
                 <strong>NVDA / TSLA / SPCX</strong>
-                <em>Paper stopped · 1H</em>
+                <em>Paper 已停止 · 1H</em>
               </div>
               <div class="qd-strategy-group">
                 <span>Filtered SuperTrend Strategy</span>
                 <strong>Watchlist basket</strong>
-                <em>Stopped · 15m</em>
+                <em>已停止 · 15m</em>
               </div>
             </aside>
 
@@ -243,19 +243,19 @@ order_intent = signal_to_order_intent(
                   <h2>Trade-T-Bucket / Paper</h2>
                   <span class="mode-pill" id="tradeMode">模拟监控</span>
                 </div>
-                <button class="qd-danger" type="button">Stop Strategy</button>
+                <button class="qd-danger" type="button" disabled aria-disabled="true">停止策略（暂未开放）</button>
               </div>
               <div class="metric-grid" id="strategyPerformance">
-                <div class="metric"><span>Total Return</span><strong class="positive">--</strong></div>
-                <div class="metric"><span>Max Drawdown</span><strong class="warning">--</strong></div>
-                <div class="metric"><span>Win Rate</span><strong>--</strong></div>
-                <div class="metric"><span>Total Trades</span><strong>--</strong></div>
+                <div class="metric"><span>总收益</span><strong class="positive">--</strong></div>
+                <div class="metric"><span>最大回撤</span><strong class="warning">--</strong></div>
+                <div class="metric"><span>胜率</span><strong>--</strong></div>
+                <div class="metric"><span>盈亏比</span><strong>--</strong></div>
               </div>
               <section class="qd-chart-card">
                 <div class="section-head">
                   <div>
-                    <h2>Equity Curve</h2>
-                    <span class="eyebrow">latest point includes unrealized P&amp;L</span>
+                    <h2>权益曲线</h2>
+                    <span class="eyebrow">最新点包含未实现 P&amp;L 盈亏</span>
                   </div>
                 </div>
                 <div class="chart-container live-chart" id="liveChart"></div>
@@ -283,7 +283,7 @@ order_intent = signal_to_order_intent(
                   </div>
                 </section>
                 <section class="surface-panel">
-                  <h3>Strategy Logs</h3>
+                  <h3>策略日志</h3>
                   <pre id="terminalLog" class="terminal"></pre>
                 </section>
                 <section class="surface-panel">
@@ -299,10 +299,10 @@ order_intent = signal_to_order_intent(
           <section class="surface-panel">
             <div class="section-head">
               <div>
-                <span class="eyebrow">Paper Execution</span>
+                <span class="eyebrow">Paper Execution 模拟执行</span>
                 <h2 id="paperOrdersTitle">Paper订单</h2>
               </div>
-              <div class="mode-pill">no live adapter</div>
+              <div class="mode-pill">未接入实盘适配器</div>
             </div>
             <div class="table-wrap">
               <table class="paper-orders-table">
@@ -326,7 +326,7 @@ order_intent = signal_to_order_intent(
             <section class="surface-panel">
               <div class="section-head">
                 <div>
-                  <span class="eyebrow">Sources</span>
+                  <span class="eyebrow">Sources 数据源</span>
                   <h2 id="dataResultsTitle">数据与结果</h2>
                 </div>
               </div>

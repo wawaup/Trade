@@ -8,7 +8,7 @@ from tradebot.allocation import allocation_config_from_dict, allocation_config_t
 from tradebot.dashboard import build_dashboard_state
 from tradebot.data import generate_synthetic_spcx
 from tradebot.data_sources import DataSourceFactory
-from tradebot.execution import PaperAccount
+from tradebot.execution import OrderIntent, PaperAccount, PaperExecutionAdapter
 from tradebot.metrics import calculate_metrics
 from tradebot.research import AssetProfile, run_multi_asset_research
 
@@ -65,6 +65,59 @@ def build_paper_orders_response():
         },
         "orders": PAPER_ORDER_LOG,
     }
+
+
+def _latest_synthetic_price(symbol: str) -> float:
+    _, intraday = generate_synthetic_spcx(seed=sum(ord(ch) for ch in symbol) + 2)
+    return intraday[-1].close
+
+
+def build_paper_order_response(raw_body: bytes):
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+        symbol = str(payload.get("symbol", "NVDA")).upper()
+        side = str(payload["side"]).lower()
+        quote_amount = float(payload.get("quoteAmount", 0.0))
+        order_type = str(payload.get("orderType", "market")).lower()
+        price = float(payload.get("price") or _latest_synthetic_price(symbol))
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return 400, {"error": str(exc)}
+
+    if side not in {"buy", "sell"}:
+        return 400, {"error": "side must be buy or sell"}
+    if order_type != "market":
+        return 400, {"error": "only market paper orders are enabled"}
+
+    quantity = quote_amount / price if side == "sell" and quote_amount > 0 else 0.0
+    intent = OrderIntent(
+        symbol=symbol,
+        side=side,
+        quote_amount=quote_amount if side == "buy" else 0.0,
+        quantity=quantity,
+        order_type=order_type,
+        source_signal="OPEN_T" if side == "buy" else "REDUCE_T",
+        strategy_id="quick-paper-t",
+        reduce_only=side == "sell",
+        paper_only=True,
+    )
+    fill = PaperExecutionAdapter(PAPER_ACCOUNT).execute(intent, price=price, fee=max(0.0, quote_amount * 0.001))
+    order = {
+        "orderId": f"po-{len(PAPER_ORDER_LOG) + 1:04d}",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "symbol": symbol,
+        "side": side,
+        "sourceSignal": intent.source_signal,
+        "orderType": order_type,
+        "quoteAmount": quote_amount,
+        "price": price,
+        "filledQty": fill.filled_qty,
+        "fee": fill.fee,
+        "status": fill.status,
+        "reason": fill.reason,
+        "paperOnly": True,
+    }
+    PAPER_ORDER_LOG.append(order)
+    return 200, {"order": order, "account": build_paper_orders_response()[1]["account"]}
 
 
 def build_backtest_results_response():
@@ -262,6 +315,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/backtest/run":
             length = int(self.headers.get("Content-Length", "0"))
             status, body = build_backtest_response(self.rfile.read(length))
+            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if self.path == "/api/paper/orders":
+            length = int(self.headers.get("Content-Length", "0"))
+            status, body = build_paper_order_response(self.rfile.read(length))
             payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")

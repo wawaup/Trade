@@ -11,11 +11,20 @@ class FrontendFilesTest(unittest.TestCase):
 
         self.assertIn('class="qd-app-shell"', html)
         self.assertIn('class="qd-sidebar"', html)
-        self.assertIn("Indicator IDE", html)
-        self.assertIn("Strategy &amp; Live", html)
-        self.assertIn("Trading Bot", html)
+        self.assertIn("IDE 指标开发", html)
+        self.assertIn("策略与实盘监控", html)
+        self.assertIn("Paper 订单", html)
         self.assertIn("Paper订单", html)
         self.assertIn("金融概念逐字说明", html)
+        self.assertIn("运行回测", html)
+        self.assertIn("刷新数据", html)
+        self.assertIn("买入做T", html)
+        self.assertIn("卖出减T", html)
+        self.assertIn("市价单", html)
+        self.assertIn("限价单（暂未开放）", html)
+        self.assertIn("创建策略（暂未开放）", html)
+        self.assertIn("停止策略（暂未开放）", html)
+        self.assertIn("disabled", html)
         self.assertIn('id="indicatorIdePage"', html)
         self.assertIn('id="strategyLivePage"', html)
         self.assertIn('id="paperOrdersPage"', html)
@@ -38,6 +47,20 @@ class FrontendFilesTest(unittest.TestCase):
         self.assertIn('tbody id="paperOrderRows"', html)
         self.assertIn('tbody id="resultHistoryRows"', html)
         self.assertIn('id="dataSourceCards"', html)
+        forbidden_copy = [
+            "CONTACT US",
+            ">Support<",
+            "Feature request",
+            "Run Backtest",
+            ">Long<",
+            ">Short<",
+            ">Market<",
+            ">Limit<",
+            "Create Strategy",
+            "Stop Strategy",
+        ]
+        for copy in forbidden_copy:
+            self.assertNotIn(copy, html)
 
     def test_frontend_script_polls_live_state(self):
         js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
@@ -62,12 +85,16 @@ class FrontendFilesTest(unittest.TestCase):
         self.assertIn("switchFactorTab", js)
         self.assertIn("validateAllocationForm", js)
         self.assertIn("scrollTop = term.scrollHeight", js)
+        self.assertIn("refreshAllData", js)
+        self.assertIn("submitPaperOrder", js)
+        self.assertIn("switchOrderType", js)
 
     def test_platform_frontend_fetches_new_api_endpoints(self):
         js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
 
         self.assertIn("/api/data-sources", js)
         self.assertIn("/api/paper/orders", js)
+        self.assertIn('method: "POST"', js)
         self.assertIn("/api/backtest/results", js)
         self.assertIn("function renderPaperOrders", js)
         self.assertIn("function renderDataSources", js)

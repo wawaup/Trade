@@ -4,6 +4,8 @@ const fmtMoney = (value) => Number.isFinite(value) && value > 0 ? `$${value.toFi
 let latestAllocation = null;
 let backtestChart = null;
 let liveChart = null;
+let activeSymbol = "NVDA";
+let activeResolution = "1m";
 
 function switchPage(targetId) {
   document.querySelectorAll(".page, .qd-page").forEach((page) => {
@@ -16,6 +18,10 @@ function switchPage(targetId) {
 
 function switchWorkspace(targetId) {
   switchPage(targetId);
+}
+
+function toggleSidebar() {
+  document.querySelector(".qd-app-shell").classList.toggle("sidebar-collapsed");
 }
 
 function toggleKnowledgeCard(event) {
@@ -152,10 +158,10 @@ function renderStrategyPerformance(summary = {}) {
   const root = document.getElementById("strategyPerformance");
   if (!root) return;
   const metrics = [
-    ["Total Return", fmtPct(summary.totalReturnPct || 0), "positive"],
-    ["Max Drawdown", fmtPct(summary.maxDrawdownPct || 0), "warning"],
-    ["Win Rate", fmtPct(summary.winRate || 0), ""],
-    ["Profit Factor", Number.isFinite(summary.profitFactor) ? summary.profitFactor.toFixed(2) : "-", ""],
+    ["总收益", fmtPct(summary.totalReturnPct || 0), "positive"],
+    ["最大回撤", fmtPct(summary.maxDrawdownPct || 0), "warning"],
+    ["胜率", fmtPct(summary.winRate || 0), ""],
+    ["盈亏比", Number.isFinite(summary.profitFactor) ? summary.profitFactor.toFixed(2) : "-", ""],
   ];
   root.innerHTML = metrics.map(([label, value, cls]) => `
     <div class="metric"><span>${label}</span><strong class="${cls}">${value}</strong></div>
@@ -246,8 +252,10 @@ function renderChart(chartRef, data) {
   chartRef.chart.timeScale().fitContent();
 }
 
-async function loadKlines(symbol = "NVDA") {
-  const response = await fetch(`/api/klines?symbol=${encodeURIComponent(symbol)}&resolution=1m`);
+async function loadKlines(symbol = activeSymbol, resolution = activeResolution) {
+  activeSymbol = symbol;
+  activeResolution = resolution;
+  const response = await fetch(`/api/klines?symbol=${encodeURIComponent(symbol)}&resolution=${encodeURIComponent(resolution)}`);
   const data = await response.json();
   renderChart(backtestChart, data);
   renderChart(liveChart, data);
@@ -392,6 +400,7 @@ async function runBacktestFromControls() {
   const symbol = payload.symbols[0] || "NVDA";
   await loadKlines(symbol);
   document.getElementById("updatedAt").textContent = new Date().toLocaleTimeString("zh-CN");
+  await loadPlatformData();
 }
 
 function switchFactorTab(panelName) {
@@ -400,6 +409,12 @@ function switchFactorTab(panelName) {
   });
   document.querySelectorAll("[data-factor-panel]").forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.factorPanel === panelName);
+  });
+}
+
+function switchOrderType(orderType) {
+  document.querySelectorAll("[data-order-type]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.orderType === orderType);
   });
 }
 
@@ -416,6 +431,16 @@ function bindControlPanel() {
   });
   document.querySelectorAll("[data-factor-target]").forEach((button) => {
     button.addEventListener("click", () => switchFactorTab(button.dataset.factorTarget));
+  });
+  document.querySelectorAll("[data-resolution]").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.querySelectorAll("[data-resolution]").forEach((item) => item.classList.remove("active"));
+      button.classList.add("active");
+      loadKlines(activeSymbol, button.dataset.resolution);
+    });
+  });
+  document.querySelectorAll("[data-order-type]:not(:disabled)").forEach((button) => {
+    button.addEventListener("click", () => switchOrderType(button.dataset.orderType));
   });
   document.getElementById("runBacktestButton").addEventListener("click", runBacktestFromControls);
 }
@@ -459,11 +484,55 @@ async function loadPlatformData() {
   renderResultHistory(await resultsRes.json());
 }
 
+async function refreshAllData() {
+  document.getElementById("connectionStatus").textContent = "刷新中";
+  await Promise.all([loadStaticState(), refreshLiveState(), loadPlatformData(), loadKlines(activeSymbol, activeResolution)]);
+}
+
+async function submitPaperOrder(side) {
+  const amountInput = document.getElementById("paperOrderAmount");
+  const message = document.getElementById("paperOrderMessage");
+  const quoteAmount = Number(amountInput.value);
+  amountInput.classList.remove("error");
+  message.textContent = "";
+  message.className = "form-message";
+  if (!Number.isFinite(quoteAmount) || quoteAmount <= 0) {
+    amountInput.classList.add("error");
+    message.textContent = "请输入大于 0 的模拟下单金额。";
+    message.className = "form-message negative";
+    return;
+  }
+  const response = await fetch("/api/paper/orders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol: activeSymbol,
+      side,
+      quoteAmount,
+      orderType: "market",
+    }),
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    message.textContent = `模拟下单失败：${body.error}`;
+    message.className = "form-message negative";
+    return;
+  }
+  message.textContent = body.order.status === "filled" ? "模拟订单已成交" : `模拟订单被拒绝：${body.order.reason}`;
+  message.className = body.order.status === "filled" ? "form-message positive" : "form-message negative";
+  await loadPlatformData();
+}
+
 async function boot() {
   document.querySelectorAll("[data-page-target]").forEach((button) => {
     button.addEventListener("click", () => switchWorkspace(button.dataset.pageTarget));
   });
   document.getElementById("knowledgeToggle").addEventListener("click", toggleKnowledgeCard);
+  document.getElementById("menuButton").addEventListener("click", toggleSidebar);
+  document.getElementById("refreshButton").addEventListener("click", refreshAllData);
+  document.querySelectorAll("[data-paper-side]").forEach((button) => {
+    button.addEventListener("click", () => submitPaperOrder(button.dataset.paperSide));
+  });
   document.addEventListener("click", (event) => {
     const card = document.getElementById("knowledgeCard");
     if (!card.contains(event.target)) collapseKnowledgeCard();

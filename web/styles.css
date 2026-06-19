@@ -32,6 +32,11 @@ body {
 
 button, input, table { font: inherit; }
 button { cursor: pointer; }
+button:disabled,
+button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.54;
+}
 h1, h2, h3, h4, p { margin: 0; }
 h2 { font-size: 1.08rem; }
 h3 { font-size: 0.92rem; color: var(--muted); }
@@ -42,6 +47,15 @@ h4 { margin-bottom: var(--space-sm); color: var(--muted); font-size: 0.82rem; }
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
   background: var(--bg);
+}
+
+.qd-app-shell.sidebar-collapsed {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
+.qd-app-shell.sidebar-collapsed .qd-sidebar {
+  overflow: hidden;
+  border-right: 0;
 }
 
 .qd-sidebar {
