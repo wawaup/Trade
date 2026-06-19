@@ -135,7 +135,9 @@ class StrategyTest(unittest.TestCase):
 
         self.assertEqual(signal.action, "BUY")
         self.assertIn("momentum", signal.reason)
-        self.assertEqual(signal.suggested_quote, 175.0)
+        # confidence=0.55 with floor=0.5 → scale≈0.61 → quote < full 175
+        self.assertLess(signal.suggested_quote, 175.0)
+        self.assertGreater(signal.suggested_quote, 80.0)
 
     def test_dynamic_take_profit_decreases_with_layers(self):
         daily = [candle(i, 100 + i, 102 + i, 99 + i, 101 + i) for i in range(25)]
@@ -155,6 +157,41 @@ class StrategyTest(unittest.TestCase):
 
         self.assertEqual(signal.action, "SELL")
         self.assertIn("dynamic profit target", signal.reason)
+
+    def test_confidence_scales_suggested_quote_below_base(self):
+        # Uptrend pullback with low ATR → confidence ≈ 0.55, floor=0.5 → quote < base 350.
+        daily = [
+            candle(i, 100 + i, 101 + i, 99 + i, 100 + i)  # tiny range → low ATR
+            for i in range(25)
+        ]
+        intraday = [
+            candle(1, 120, 121, 118, 119, 1000),
+            candle(2, 119, 120, 117, 118, 1200),
+            candle(3, 118, 121, 117.5, 120.6, 2000),
+        ]
+
+        signal = generate_signal(daily, intraday, position_quote=0, config=StrategyConfig())
+
+        self.assertEqual(signal.action, "BUY")
+        self.assertLess(signal.suggested_quote, 350.0)
+        self.assertGreater(signal.suggested_quote, 100.0)
+
+    def test_confidence_size_floor_1_gives_full_quote(self):
+        # floor=1.0 disables scaling: suggested_quote always equals base.
+        daily = [candle(i, 100 + i, 102 + i, 99 + i, 101 + i) for i in range(25)]
+        intraday = [
+            candle(1, 120, 121, 118, 119, 1000),
+            candle(2, 119, 120, 117, 118, 1200),
+            candle(3, 118, 121, 117.5, 120.6, 2000),
+        ]
+
+        signal = generate_signal(
+            daily, intraday, position_quote=0,
+            config=StrategyConfig(confidence_size_floor=1.0),
+        )
+
+        self.assertEqual(signal.action, "BUY")
+        self.assertAlmostEqual(signal.suggested_quote, 350.0)
 
     def test_stop_loss_uses_atr_multiplier_when_atr_available(self):
         # Daily candles have TR=3 per bar, close≈125 → ATR% ≈ 2.4%.

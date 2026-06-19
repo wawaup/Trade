@@ -27,6 +27,7 @@ class StrategyConfig:
     flash_crash_pct: float = 0.05
     max_layers: int = 3
     session_reset_utc_hour: int = 13
+    confidence_size_floor: float = 0.5
 
 
 def generate_signal(
@@ -79,7 +80,13 @@ def generate_signal(
     strong_momentum = has_strong_momentum(intraday, day_vwap, config)
 
     if trend == "uptrend" and strong_momentum and position_quote <= 0:
-        return Signal("BUY", "momentum follow-through above VWAP", 0.55, config.momentum_order_quote)
+        momentum_confidence = 0.55
+        return Signal(
+            "BUY",
+            "momentum follow-through above VWAP",
+            momentum_confidence,
+            confidence_sized_quote(config.momentum_order_quote, momentum_confidence, config.confidence_size_floor),
+        )
 
     if trend == "uptrend" and previous_was_pullback and reclaimed_vwap:
         confidence = 0.65 + min(daily_atr, 0.08)
@@ -87,10 +94,22 @@ def generate_signal(
         if not volatile_enough:
             reason += "; ATR is low, size conservatively"
             confidence -= 0.1
-        return Signal("BUY", reason, min(confidence, 0.9), config.min_order_quote)
+        confidence = min(confidence, 0.9)
+        return Signal(
+            "BUY",
+            reason,
+            confidence,
+            confidence_sized_quote(config.min_order_quote, confidence, config.confidence_size_floor),
+        )
 
     if trend == "neutral" and volatile_enough and previous_was_neutral_pullback and reclaimed_vwap:
-        return Signal("BUY", "neutral range pullback reclaimed VWAP", 0.55, config.min_order_quote)
+        neutral_confidence = 0.55
+        return Signal(
+            "BUY",
+            "neutral range pullback reclaimed VWAP",
+            neutral_confidence,
+            confidence_sized_quote(config.min_order_quote, neutral_confidence, config.confidence_size_floor),
+        )
 
     if trend in {"uptrend", "neutral"} and current.close < day_vwap:
         return Signal("HOLD", "below VWAP; wait for reclaim", 0.2)
@@ -104,6 +123,16 @@ def dynamic_take_profit_pct(layers: int, config: StrategyConfig) -> float:
     if layers == 2:
         return config.layer2_take_profit_pct
     return config.take_profit_pct
+
+
+def confidence_sized_quote(base_quote: float, confidence: float, floor: float) -> float:
+    """Scale base_quote by confidence.
+
+    confidence=0.9 (max) → full size; floor fraction at confidence=0.
+    Example with floor=0.5: confidence 0.55 → ~61%, 0.65 → ~72%, 0.9 → 100%.
+    """
+    scale = max(floor, min(confidence / 0.9, 1.0))
+    return base_quote * scale
 
 
 def has_strong_momentum(intraday: list[Candle], day_vwap: float, config: StrategyConfig) -> bool:
