@@ -1,6 +1,6 @@
 import unittest
 
-from tradebot.backtest import BacktestConfig, run_backtest
+from tradebot.backtest import BacktestConfig, run_backtest, run_walk_forward
 from tradebot.data import generate_synthetic_spcx
 from tradebot.models import Candle
 from tradebot.strategy import StrategyConfig
@@ -163,6 +163,54 @@ class BacktestTest(unittest.TestCase):
 
         self.assertEqual([trade for trade in result.trades if trade.side == "BUY"], [])
         self.assertTrue(any(event["type"] == "max_layers_rejected" for event in result.risk_events))
+
+
+class WalkForwardTest(unittest.TestCase):
+    def _long_daily(self, n=120):
+        return [candle(i, 100 + i * 0.05, 102 + i * 0.05, 99 + i * 0.05, 100.5 + i * 0.05) for i in range(n)]
+
+    def test_walk_forward_produces_correct_fold_count(self):
+        # 120 bars, in_sample=40, oos=20, step=10 → folds start at 0,10,20,...,60 → 7 folds
+        daily = self._long_daily(120)
+        wf = run_walk_forward(
+            daily, BacktestConfig(starting_quote=600), StrategyConfig(),
+            in_sample_bars=40, oos_bars=20, step_bars=10, symbol="TEST",
+        )
+        # window_size=60, can start at 0,10,...,60 (7 positions)
+        self.assertEqual(wf.total_folds, 7)
+        self.assertEqual(len(wf.folds), 7)
+
+    def test_walk_forward_fold_indices_are_sequential(self):
+        daily = self._long_daily(100)
+        wf = run_walk_forward(
+            daily, BacktestConfig(starting_quote=600), StrategyConfig(),
+            in_sample_bars=40, oos_bars=20, step_bars=10,
+        )
+        for i, fold in enumerate(wf.folds):
+            self.assertEqual(fold.fold_index, i)
+            self.assertEqual(fold.oos_start - fold.in_sample_start, 40)
+            self.assertEqual(fold.oos_end - fold.oos_start, 20)
+
+    def test_walk_forward_returns_zero_folds_when_insufficient_data(self):
+        daily = self._long_daily(30)  # less than in_sample+oos=60
+        wf = run_walk_forward(
+            daily, BacktestConfig(starting_quote=600), StrategyConfig(),
+            in_sample_bars=40, oos_bars=20, step_bars=10,
+        )
+        self.assertEqual(wf.total_folds, 0)
+
+    def test_walk_forward_result_has_summary_stats(self):
+        daily = self._long_daily(100)
+        wf = run_walk_forward(
+            daily, BacktestConfig(starting_quote=600), StrategyConfig(),
+            in_sample_bars=40, oos_bars=20, step_bars=10, symbol="DEMO",
+        )
+        self.assertEqual(wf.symbol, "DEMO")
+        self.assertIsInstance(wf.mean_oos_return_pct, float)
+        self.assertIsInstance(wf.median_oos_return_pct, float)
+        self.assertGreaterEqual(wf.positive_fold_rate, 0.0)
+        self.assertLessEqual(wf.positive_fold_rate, 1.0)
+        self.assertIsInstance(wf.mean_oos_max_drawdown_pct, float)
 
 
 if __name__ == "__main__":

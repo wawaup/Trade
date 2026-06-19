@@ -6,7 +6,7 @@ from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 from tradebot.allocation import allocation_config_from_dict, allocation_config_to_dict, build_allocations, default_allocation_config
-from tradebot.backtest import BacktestConfig, run_backtest
+from tradebot.backtest import BacktestConfig, WalkForwardResult, run_backtest, run_walk_forward
 from tradebot.dashboard import build_dashboard_state
 from tradebot.data import generate_synthetic_spcx
 from tradebot.data_sources import DataSourceFactory
@@ -277,6 +277,83 @@ def build_backtest_result_detail_response(result_id: str):
     if result is None:
         return 404, {"error": f"backtest result not found: {result_id}"}
     return 200, {"result": result}
+
+
+def build_walk_forward_response(raw_body: bytes):
+    import calendar
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+        symbol = str(payload.get("symbol", "SPCXBUSDT")).upper()
+        start_date = str(payload.get("startDate", "2025-01-01"))
+        end_date = str(payload.get("endDate", ""))
+        in_sample_bars = int(payload.get("inSampleBars", 40))
+        oos_bars = int(payload.get("oosBars", 20))
+        step_bars = int(payload.get("stepBars", 10))
+        slippage = float(payload.get("slippageBps", 30))
+        spread = float(payload.get("spreadBps", 20))
+        per_symbol_quote = float(payload.get("perSymbolQuote", 600.0))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return 400, {"error": str(exc)}
+
+    from datetime import datetime, timezone as tz
+    try:
+        start_ms = int(datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=tz.utc).timestamp() * 1000)
+        if end_date:
+            end_ms = int(datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=tz.utc).timestamp() * 1000)
+        else:
+            end_ms = int(datetime.now(tz.utc).timestamp() * 1000)
+    except ValueError as exc:
+        return 400, {"error": f"invalid date: {exc}"}
+
+    from tradebot.data_sources import BinanceHistoricalDataSource
+    try:
+        src = BinanceHistoricalDataSource()
+        daily = src.get_daily_range(symbol, start_ms, end_ms)
+    except Exception as exc:
+        return 502, {"error": str(exc), "symbol": symbol}
+
+    if len(daily) < in_sample_bars + oos_bars:
+        return 400, {"error": f"not enough daily bars: got {len(daily)}, need {in_sample_bars + oos_bars}"}
+
+    bt_config = BacktestConfig(
+        starting_quote=per_symbol_quote,
+        core_allocation_pct=0.70,
+        slippage_bps=slippage,
+        synthetic_spread_bps=spread,
+    )
+    wf = run_walk_forward(daily, bt_config, StrategyConfig(), in_sample_bars, oos_bars, step_bars, symbol=symbol)
+
+    folds_json = [
+        {
+            "foldIndex": f.fold_index,
+            "inSampleStart": f.in_sample_start,
+            "inSampleEnd": f.in_sample_end,
+            "oosStart": f.oos_start,
+            "oosEnd": f.oos_end,
+            "oosReturnPct": f.oos_return_pct,
+            "oosMaxDrawdownPct": f.oos_max_drawdown_pct,
+            "oosWinRate": f.oos_win_rate,
+        }
+        for f in wf.folds
+    ]
+    return 200, {
+        "walkForward": {
+            "symbol": wf.symbol,
+            "totalFolds": wf.total_folds,
+            "meanOosReturnPct": wf.mean_oos_return_pct,
+            "medianOosReturnPct": wf.median_oos_return_pct,
+            "positiveFoldRate": wf.positive_fold_rate,
+            "meanOosMaxDrawdownPct": wf.mean_oos_max_drawdown_pct,
+            "folds": folds_json,
+            "params": {
+                "inSampleBars": in_sample_bars,
+                "oosBars": oos_bars,
+                "stepBars": step_bars,
+                "startDate": start_date,
+                "endDate": end_date,
+            },
+        }
+    }
 
 
 def append_backtest_result(result: dict) -> dict:
@@ -595,6 +672,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/paper/reset":
             length = int(self.headers.get("Content-Length", "0"))
             status, body = build_paper_reset_response(self.rfile.read(length))
+            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if self.path == "/api/backtest/walkforward":
+            length = int(self.headers.get("Content-Length", "0"))
+            status, body = build_walk_forward_response(self.rfile.read(length))
             payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
