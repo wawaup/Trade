@@ -13,6 +13,22 @@ from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+
+# ── 中文字体配置 ──────────────────────────────────────────
+def _setup_chinese_font():
+    candidates = ["Kaiti SC", "PingFang SC", "Heiti SC", "Arial Unicode MS",
+                  "Noto Sans CJK SC", "WenQuanYi Micro Hei"]
+    available = {f.name for f in fm.fontManager.ttflist}
+    for font in candidates:
+        if font in available:
+            matplotlib.rcParams["font.family"] = font
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            return font
+    matplotlib.rcParams["axes.unicode_minus"] = False
+    return None
+
+_FONT = _setup_chinese_font()
 import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
