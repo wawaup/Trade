@@ -5,12 +5,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from tradebot.allocation import allocation_config_from_dict, allocation_config_to_dict, build_allocations, default_allocation_config
+from tradebot.backtest import BacktestConfig, run_backtest
 from tradebot.dashboard import build_dashboard_state
 from tradebot.data import generate_synthetic_spcx
 from tradebot.data_sources import DataSourceFactory
 from tradebot.execution import OrderIntent, PaperAccount, PaperExecutionAdapter
 from tradebot.metrics import calculate_metrics
-from tradebot.research import AssetProfile, run_multi_asset_research
+from tradebot.research import AssetProfile
+from tradebot.serialization import serialize_backtest_result
+from tradebot.storage import BacktestResultStore
+from tradebot.strategy import StrategyConfig
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +24,7 @@ PAPER_ACCOUNT = PaperAccount(cash=10_000.0)
 PAPER_ORDER_LOG = []
 BACKTEST_RESULTS = []
 BACKTEST_ENGINE_VERSION = "trade-research-v1"
+BACKTEST_STORE = BacktestResultStore(ROOT / "data" / "backtest_results.json")
 
 
 def build_static_state():
@@ -37,8 +42,15 @@ def build_live_state():
     return {"live": state["live"]}
 
 
-def build_klines_response(symbol: str, resolution: str):
-    _, intraday = generate_synthetic_spcx(seed=sum(ord(ch) for ch in symbol) + len(resolution))
+def build_klines_response(symbol: str, resolution: str, source: str = "Synthetic"):
+    try:
+        normalized_source = DataSourceFactory.normalize_source(source)
+        _, intraday = DataSourceFactory.get_source(normalized_source).get_default_candles(symbol=symbol)
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
+    except Exception as exc:
+        return 502, {"error": str(exc), "source": source}
+
     candles = []
     vwap = []
     cumulative_quote = 0.0
@@ -49,7 +61,15 @@ def build_klines_response(symbol: str, resolution: str):
         cumulative_quote += candle.quote_volume
         cumulative_volume += candle.volume
         vwap.append([time_s, cumulative_quote / cumulative_volume if cumulative_volume else candle.close])
-    return 200, {"symbol": symbol, "resolution": resolution, "candles": candles, "vwap": vwap}
+    status = "demo" if normalized_source == "Synthetic" else "live"
+    return 200, {
+        "symbol": symbol,
+        "resolution": resolution,
+        "source": normalized_source,
+        "dataStatus": status,
+        "candles": candles,
+        "vwap": vwap,
+    }
 
 
 def build_data_sources_response():
@@ -120,19 +140,44 @@ def build_paper_order_response(raw_body: bytes):
     return 200, {"order": order, "account": build_paper_orders_response()[1]["account"]}
 
 
+def build_paper_reset_response(raw_body: bytes = b""):
+    try:
+        payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+        cash = float(payload.get("cash", 10_000.0))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return 400, {"error": str(exc)}
+    if cash < 0:
+        return 400, {"error": "cash must be non-negative"}
+
+    PAPER_ACCOUNT.cash = cash
+    PAPER_ACCOUNT.positions.clear()
+    PAPER_ORDER_LOG.clear()
+    return build_paper_orders_response()
+
+
 def build_backtest_results_response():
+    stored = BACKTEST_STORE.list_recent(limit=20)
+    if stored:
+        BACKTEST_RESULTS[:] = stored
     return 200, {"results": BACKTEST_RESULTS[-20:]}
 
 
-def append_backtest_result(summary: dict) -> dict:
-    result = {
-        "resultId": f"bt-{len(BACKTEST_RESULTS) + 1:04d}",
-        "createdAt": datetime.now(timezone.utc).isoformat(),
-        "summary": summary,
-        "engineVersion": BACKTEST_ENGINE_VERSION,
-    }
-    BACKTEST_RESULTS.append(result)
-    return result
+def build_backtest_result_detail_response(result_id: str):
+    result = BACKTEST_STORE.get(result_id)
+    if result is None:
+        for row in BACKTEST_RESULTS:
+            if row.get("resultId") == result_id:
+                result = row
+                break
+    if result is None:
+        return 404, {"error": f"backtest result not found: {result_id}"}
+    return 200, {"result": result}
+
+
+def append_backtest_result(result: dict) -> dict:
+    stored = BACKTEST_STORE.append(result)
+    BACKTEST_RESULTS.append(stored)
+    return stored
 
 
 def build_backtest_response(raw_body: bytes):
@@ -141,6 +186,7 @@ def build_backtest_response(raw_body: bytes):
         symbols = [str(symbol).upper() for symbol in payload.get("symbols", [])]
         slippage = float(payload.get("slippageBps", 30))
         spread = float(payload.get("spreadBps", 20))
+        source = DataSourceFactory.normalize_source(payload.get("source", "Synthetic"))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         return 400, {"error": str(exc)}
 
@@ -152,39 +198,99 @@ def build_backtest_response(raw_body: bytes):
         AssetProfile("CPOX", "CPO光通信", 35, 40),
     ]
     selected = [profile for profile in all_profiles if not symbols or profile.symbol in symbols]
-    adjusted = [AssetProfile(profile.symbol, profile.theme, slippage, spread) for profile in selected]
-    multi = run_multi_asset_research(adjusted, starting_quote=15_000, global_t_max_exposure_pct=0.30)
-    aggregate_start = sum(row.result.starting_quote * 0.30 for row in multi.asset_results)
+    if symbols and not selected:
+        selected = [AssetProfile(symbol, "自定义标的", 30, 20) for symbol in symbols]
+    data_source = DataSourceFactory.get_source(source)
+    asset_results = []
+    per_asset_quote = 15_000 / len(selected) if selected else 0.0
+    for profile in selected:
+        try:
+            daily, intraday = data_source.get_default_candles(symbol=profile.symbol)
+        except Exception as exc:
+            return 502, {"error": str(exc), "source": source, "symbol": profile.symbol}
+        result = run_backtest(
+            daily,
+            intraday,
+            BacktestConfig(
+                starting_quote=per_asset_quote,
+                core_allocation_pct=0.70,
+                slippage_bps=slippage,
+                synthetic_spread_bps=spread,
+            ),
+            StrategyConfig(),
+        )
+        metrics = calculate_metrics(result.starting_quote * 0.30, result.equity_curve, result.trade_pnls)
+        asset_results.append({"profile": profile, "result": result, "metrics": metrics})
+
+    aggregate_start = sum(row["result"].starting_quote * 0.30 for row in asset_results)
     aggregate_curve = [aggregate_start]
     aggregate_pnls = []
-    for row in multi.asset_results:
-        aggregate_curve.append(aggregate_curve[-1] + (row.result.ending_equity - row.result.starting_quote * 0.30))
-        aggregate_pnls.extend(row.result.trade_pnls)
+    max_global_t_exposure = 0.0
+    for row in asset_results:
+        result = row["result"]
+        aggregate_curve.append(aggregate_curve[-1] + (result.ending_equity - result.starting_quote * 0.30))
+        aggregate_pnls.extend(result.trade_pnls)
+        max_global_t_exposure += result.max_t_position_quote
     aggregate_metrics = calculate_metrics(aggregate_start, aggregate_curve, aggregate_pnls)
     summary = {
         "totalReturnPct": aggregate_metrics.total_return_pct,
         "maxDrawdownPct": aggregate_metrics.max_drawdown_pct,
         "winRate": aggregate_metrics.win_rate,
         "profitFactor": aggregate_metrics.profit_factor,
-        "globalTExposureCap": multi.max_global_t_exposure,
+        "globalTExposureCap": min(max_global_t_exposure, 15_000 * 0.30),
     }
-    append_backtest_result(summary)
+    assets = [
+        {
+            "symbol": row["profile"].symbol,
+            "theme": row["profile"].theme,
+            "returnPct": row["metrics"].total_return_pct,
+            "maxDrawdownPct": row["metrics"].max_drawdown_pct,
+            "winRate": row["metrics"].win_rate,
+            "profitFactor": row["metrics"].profit_factor,
+            "trades": len(row["result"].trades),
+            "feesPaid": row["result"].fees_paid,
+        }
+        for row in asset_results
+    ]
+    created_at = datetime.now(timezone.utc).isoformat()
+    result_id = f"bt-{len(BACKTEST_RESULTS) + 1:04d}"
+    primary_result = asset_results[0]["result"] if asset_results else None
+    if primary_result is not None:
+        persisted = serialize_backtest_result(
+            primary_result,
+            result_id=result_id,
+            created_at=created_at,
+            symbols=[row["profile"].symbol for row in asset_results],
+            summary=summary,
+            assets=assets,
+            source=source,
+        )
+    else:
+        persisted = {
+            "resultId": result_id,
+            "createdAt": created_at,
+            "engineVersion": BACKTEST_ENGINE_VERSION,
+            "source": source,
+            "symbols": symbols,
+            "configSnapshot": {"slippageBps": slippage, "spreadBps": spread},
+            "executionAssumptions": {"paperOnly": True},
+            "summary": summary,
+            "assets": assets,
+            "equityCurve": [],
+            "trades": [],
+            "tradePnls": [],
+            "orderIntents": [],
+            "riskEvents": [],
+        }
+    append_backtest_result(persisted)
     return 200, {
         "backtest": {
+            "resultId": persisted["resultId"],
+            "source": persisted["source"],
+            "configSnapshot": persisted["configSnapshot"],
+            "executionAssumptions": persisted["executionAssumptions"],
             "summary": summary,
-            "assets": [
-                {
-                    "symbol": row.symbol,
-                    "theme": row.theme,
-                    "returnPct": row.metrics.total_return_pct,
-                    "maxDrawdownPct": row.metrics.max_drawdown_pct,
-                    "winRate": row.metrics.win_rate,
-                    "profitFactor": row.metrics.profit_factor,
-                    "trades": len(row.result.trades),
-                    "feesPaid": row.result.fees_paid,
-                }
-                for row in multi.asset_results
-            ]
+            "assets": assets,
         }
     }
 
@@ -264,6 +370,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             status, body = build_klines_response(
                 params.get("symbol", ["NVDA"])[0],
                 params.get("resolution", ["1m"])[0],
+                params.get("source", ["Synthetic"])[0],
             )
             payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
@@ -299,6 +406,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
+        if parsed.path.startswith("/api/backtest/results/"):
+            result_id = parsed.path.rsplit("/", 1)[-1]
+            status, body = build_backtest_result_detail_response(result_id)
+            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         return super().do_GET()
 
     def do_POST(self):
@@ -325,6 +442,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/paper/orders":
             length = int(self.headers.get("Content-Length", "0"))
             status, body = build_paper_order_response(self.rfile.read(length))
+            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if self.path == "/api/paper/reset":
+            length = int(self.headers.get("Content-Length", "0"))
+            status, body = build_paper_reset_response(self.rfile.read(length))
             payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")

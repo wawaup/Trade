@@ -38,6 +38,9 @@ class PositionSnapshot:
 class RiskLimits:
     max_t_position_quote: Optional[float] = None
     max_order_quote: Optional[float] = None
+    max_spread_pct: Optional[float] = None
+    market_data_max_age_sec: Optional[float] = None
+    daily_loss_limit_quote: Optional[float] = None
 
 
 @dataclass
@@ -76,7 +79,7 @@ class PaperExecutionAdapter:
         self.risk_limits = risk_limits or RiskLimits()
         self.fills = []
 
-    def execute(self, intent, *, price, fee=0.0):
+    def execute(self, intent, *, price, fee=0.0, spread_pct=None, market_data_age_sec=None, daily_loss_quote=None):
         try:
             px = float(price)
             order_fee = float(fee or 0.0)
@@ -84,6 +87,9 @@ class PaperExecutionAdapter:
             return self._reject(intent, "invalid price or fee")
         if px <= 0:
             return self._reject(intent, "invalid price")
+        risk_rejection = self._risk_rejection(intent, spread_pct, market_data_age_sec, daily_loss_quote)
+        if risk_rejection:
+            return self._reject(intent, risk_rejection)
 
         if intent.side == "buy":
             fill = self._buy(intent, px, order_fee)
@@ -93,6 +99,30 @@ class PaperExecutionAdapter:
             fill = self._reject(intent, f"invalid side: {intent.side}")
         self.fills.append(fill)
         return fill
+
+    def _risk_rejection(self, intent, spread_pct, market_data_age_sec, daily_loss_quote):
+        if self.risk_limits.max_spread_pct is not None and spread_pct is not None:
+            try:
+                spread = float(spread_pct)
+            except (TypeError, ValueError):
+                return "invalid spread"
+            if spread > self.risk_limits.max_spread_pct:
+                return "spread exceeds max"
+        if self.risk_limits.market_data_max_age_sec is not None and market_data_age_sec is not None:
+            try:
+                age = float(market_data_age_sec)
+            except (TypeError, ValueError):
+                return "invalid market data age"
+            if age > self.risk_limits.market_data_max_age_sec:
+                return "stale market data"
+        if self.risk_limits.daily_loss_limit_quote is not None and daily_loss_quote is not None:
+            try:
+                loss = float(daily_loss_quote)
+            except (TypeError, ValueError):
+                return "invalid daily loss"
+            if loss > self.risk_limits.daily_loss_limit_quote:
+                return "daily loss cap breached"
+        return ""
 
     def _buy(self, intent, price, fee):
         quote = float(intent.quote_amount or 0.0)

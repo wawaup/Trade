@@ -59,11 +59,11 @@ def default_allocation_config(total_account_quote: float = 15_000) -> Allocation
     return AllocationConfig(
         total_account_quote=total_account_quote,
         symbols=[
-            SymbolAllocation("SPCX", 0.25, 0.30),
-            SymbolAllocation("TSLA", 0.20, 0.25),
-            SymbolAllocation("NVDA", 0.20, 0.25),
-            SymbolAllocation("MU", 0.15, 0.30),
-            SymbolAllocation("CPOX", 0.10, 0.35),
+            SymbolAllocation("SPCX", 0.25, 0.20),
+            SymbolAllocation("TSLA", 0.20, 0.15),
+            SymbolAllocation("NVDA", 0.20, 0.15),
+            SymbolAllocation("MU", 0.15, 0.10),
+            SymbolAllocation("CPOX", 0.10, 0.10),
         ],
     )
 
@@ -90,4 +90,3 @@ def allocation_config_to_dict(config: AllocationConfig) -> dict:
             for item in config.symbols
         ],
     }
-

@@ -54,6 +54,8 @@ def run_backtest(
     trades: list[Trade] = []
     equity_curve: list[float] = [cash]
     trade_pnls: list[float] = []
+    order_intents: list[dict] = []
+    risk_events: list[dict] = []
     layers = 0
 
     for idx in range(2, len(intraday) + 1):
@@ -84,6 +86,29 @@ def run_backtest(
             or current.close <= last_buy_price * (1 - strategy_config.buy_grid_spacing_pct)
         )
 
+        if signal.action == "BUY":
+            source_signal = "OPEN_T" if layers <= 0 else "ADD_T"
+            order_intents.append(
+                _order_intent_record(
+                    current.open_time,
+                    "buy",
+                    source_signal,
+                    signal.suggested_quote,
+                    0.0,
+                    signal.reason,
+                )
+            )
+            if not quality_ok:
+                risk_events.append(_risk_event(current.open_time, "spread_rejected", quality_reason, signal.reason))
+            elif cash < signal.suggested_quote:
+                risk_events.append(
+                    _risk_event(current.open_time, "cash_rejected", "insufficient cash", signal.reason)
+                )
+            elif not buy_is_spaced:
+                risk_events.append(
+                    _risk_event(current.open_time, "grid_spacing_rejected", "buy grid spacing not reached", signal.reason)
+                )
+
         if signal.action == "BUY" and quality_ok and cash >= signal.suggested_quote and buy_is_spaced:
             quote = min(signal.suggested_quote, cash, max_t_bucket - t_value)
             if quote >= signal.suggested_quote:
@@ -100,8 +125,29 @@ def run_backtest(
                 trades.append(
                     Trade("BUY", current.open_time, fill_price, qty, quote, fee, signal.reason)
                 )
+            else:
+                risk_events.append(
+                    _risk_event(current.open_time, "t_bucket_cap_rejected", "T bucket cap exceeded", signal.reason)
+                )
 
-        elif signal.action == "SELL" and quality_ok and t_qty > 0:
+        elif signal.action == "SELL":
+            order_intents.append(
+                _order_intent_record(
+                    current.open_time,
+                    "sell",
+                    "CLOSE_T",
+                    0.0,
+                    t_qty,
+                    signal.reason,
+                    reduce_only=True,
+                )
+            )
+            if not quality_ok:
+                risk_events.append(_risk_event(current.open_time, "spread_rejected", quality_reason, signal.reason))
+            elif t_qty <= 0:
+                risk_events.append(_risk_event(current.open_time, "position_rejected", "no T position", signal.reason))
+
+        if signal.action == "SELL" and quality_ok and t_qty > 0:
             fill_price = current.close * (1 - backtest_config.slippage_bps / 10_000)
             gross = t_qty * fill_price
             fee = fees.estimate(gross)
@@ -155,6 +201,39 @@ def run_backtest(
         engine_version="tradebot-backtest-v2",
         config_snapshot=config_snapshot,
         execution_assumptions=execution_assumptions,
-        order_intents=[],
-        risk_events=[],
+        order_intents=order_intents,
+        risk_events=risk_events,
     )
+
+
+def _order_intent_record(
+    timestamp: int,
+    side: str,
+    source_signal: str,
+    quote_amount: float,
+    quantity: float,
+    reason: str,
+    reduce_only: bool = False,
+) -> dict:
+    return {
+        "timestamp": timestamp,
+        "symbol": "T_BUCKET",
+        "side": side,
+        "quoteAmount": float(quote_amount or 0.0),
+        "quantity": float(quantity or 0.0),
+        "orderType": "market",
+        "sourceSignal": source_signal,
+        "strategyId": "t-vwap",
+        "reduceOnly": reduce_only,
+        "paperOnly": True,
+        "reason": reason,
+    }
+
+
+def _risk_event(timestamp: int, event_type: str, reason: str, signal_reason: str) -> dict:
+    return {
+        "timestamp": timestamp,
+        "type": event_type,
+        "reason": reason,
+        "signalReason": signal_reason,
+    }

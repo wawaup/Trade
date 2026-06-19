@@ -71,6 +71,53 @@ class BacktestTest(unittest.TestCase):
         self.assertIsInstance(result.order_intents, list)
         self.assertIsInstance(result.risk_events, list)
 
+    def test_backtest_records_order_intent_for_buy_signal(self):
+        daily = [candle(i, 100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(30)]
+        intraday = [
+            candle(100, 130, 131, 128, 129, 1000),
+            candle(101, 129, 130, 127, 128, 1000),
+            candle(102, 128, 132, 127.5, 131.5, 2000),
+        ]
+
+        result = run_backtest(
+            daily,
+            intraday,
+            BacktestConfig(starting_quote=3500, core_allocation_pct=0.70),
+            StrategyConfig(take_profit_pct=0.05),
+        )
+
+        self.assertGreaterEqual(len(result.order_intents), 1)
+        intent = result.order_intents[0]
+        self.assertEqual(intent["sourceSignal"], "OPEN_T")
+        self.assertEqual(intent["side"], "buy")
+        self.assertEqual(intent["quoteAmount"], 350.0)
+        self.assertEqual(intent["strategyId"], "t-vwap")
+        self.assertTrue(intent["paperOnly"])
+
+    def test_backtest_records_risk_event_when_spread_rejects_signal(self):
+        daily = [candle(i, 100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(30)]
+        intraday = [
+            candle(100, 130, 131, 128, 129, 1000),
+            candle(101, 129, 130, 127, 128, 1000),
+            candle(102, 128, 132, 127.5, 131.5, 2000),
+        ]
+
+        result = run_backtest(
+            daily,
+            intraday,
+            BacktestConfig(
+                starting_quote=3500,
+                core_allocation_pct=0.70,
+                synthetic_spread_bps=100,
+                max_spread_pct=0.001,
+            ),
+            StrategyConfig(take_profit_pct=0.05),
+        )
+
+        self.assertGreaterEqual(len(result.risk_events), 1)
+        self.assertEqual(result.risk_events[0]["type"], "spread_rejected")
+        self.assertIn("spread", result.risk_events[0]["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()
