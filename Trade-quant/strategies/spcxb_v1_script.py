@@ -49,12 +49,19 @@ def on_bar(ctx, bar):
         if len(blist) < period + 1:
             return None
         trs = []
-        for i in range(len(blist) - period, len(blist)):
+        for i in range(1, len(blist)):
             pc = blist[i - 1].close
             c  = blist[i]
             trs.append(max(c.high - c.low, abs(c.high - pc), abs(c.low - pc)))
+        if len(trs) < period:
+            return None
+        # 初始 ATR = 前 period 个 TR 的简单平均
+        atr = sum(trs[:period]) / period
+        # Wilder 平滑（RMA）
+        for tr in trs[period:]:
+            atr = (atr * (period - 1) + tr) / period
         lc = blist[-1].close
-        return (sum(trs) / period) / lc if lc > 0 else None
+        return atr / lc if lc > 0 else None
 
     def _session_vwap(blist, n):
         w = blist[-min(n, len(blist)):]
@@ -73,16 +80,17 @@ def on_bar(ctx, bar):
             lo = min(b.low for b in win)
             hi = max(b.high for b in win)
             rsv = 50.0 if hi == lo else (blist[i].close - lo) / (hi - lo) * 100
-            k = (1 - alpha) * k + alpha * rsv
-            d = (1 - alpha) * d + alpha * k
+            if i >= period - 1:
+                k = (1 - alpha) * k + alpha * rsv
+                d = (1 - alpha) * d + alpha * k
         return k, d, 3 * k - 2 * d
 
     def _ema(vals, n):
         if len(vals) < n:
             return None
+        e = sum(vals[:n]) / n   # SMA 种子
         alpha = 2.0 / (n + 1)
-        e = vals[0]
-        for v in vals[1:]:
+        for v in vals[n:]:
             e = alpha * v + (1 - alpha) * e
         return e
 
@@ -133,8 +141,8 @@ def on_bar(ctx, bar):
         tp_targets = [tp1, tp2, tp3]
         tp = tp_targets[min(layers - 1, 2)] if layers > 0 else tp1
         if pnl >= tp:
-            ctx.sell(reason=f"TP layer {layers} pnl={pnl:.2%}")
-            ctx.state['layers'] = max(0, layers - 1)
+            ctx.close_position()
+            ctx.state['layers'] = 0
             ctx.log(f"TP layer={layers} pnl={pnl:.2%}")
             return
 
@@ -157,7 +165,8 @@ def on_bar(ctx, bar):
     if vwap_reclaim and j_ok and vol_spike:
         ctx.buy(reason="vwap_reclaim")
         ctx.state['layers'] = 1
-        ctx.log(f"BUY vwap_reclaim j={jval:.1f if jval else 'N/A'}")
+        _j_str = f"{jval:.1f}" if jval is not None else "N/A"
+        ctx.log(f"BUY vwap_reclaim j={_j_str}")
     elif momentum and j_ok:
         ctx.buy(reason="momentum")
         ctx.state['layers'] = 1
