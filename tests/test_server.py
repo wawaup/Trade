@@ -170,6 +170,98 @@ class ServerTest(unittest.TestCase):
         self.assertIn("max order quote", body["order"]["reason"])
         self.assertEqual(PAPER_ACCOUNT.positions, {})
 
+    def test_build_paper_order_response_rejects_wide_spread(self):
+        payload = {
+            "symbol": "NVDA",
+            "side": "buy",
+            "quoteAmount": 350,
+            "price": 100,
+            "orderType": "market",
+            "spreadPct": 0.02,
+        }
+
+        status, body = build_paper_order_response(json.dumps(payload).encode("utf-8"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["order"]["status"], "rejected")
+        self.assertIn("spread", body["order"]["reason"])
+        self.assertEqual(PAPER_ACCOUNT.positions, {})
+
+    def test_build_paper_order_response_rejects_stale_market_data(self):
+        payload = {
+            "symbol": "NVDA",
+            "side": "buy",
+            "quoteAmount": 350,
+            "price": 100,
+            "orderType": "market",
+            "marketDataAgeSec": 120,
+        }
+
+        status, body = build_paper_order_response(json.dumps(payload).encode("utf-8"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["order"]["status"], "rejected")
+        self.assertIn("stale", body["order"]["reason"])
+        self.assertEqual(PAPER_ACCOUNT.positions, {})
+
+    def test_partial_paper_sell_reduces_layer_tracking_and_allows_next_layer(self):
+        first_buy = {
+            "symbol": "NVDA",
+            "side": "buy",
+            "quoteAmount": 1000,
+            "price": 100,
+            "orderType": "market",
+        }
+        partial_sell = {
+            "symbol": "NVDA",
+            "side": "sell",
+            "quoteAmount": 500,
+            "price": 100,
+            "orderType": "market",
+        }
+        next_buy = {
+            "symbol": "NVDA",
+            "side": "buy",
+            "quoteAmount": 350,
+            "price": 99,
+            "orderType": "market",
+        }
+
+        build_paper_order_response(json.dumps(first_buy).encode("utf-8"))
+        sell_status, sell_body = build_paper_order_response(json.dumps(partial_sell).encode("utf-8"))
+
+        self.assertEqual(sell_status, 200)
+        self.assertEqual(sell_body["order"]["status"], "filled")
+        self.assertNotIn("NVDA", _server.PAPER_T_LAYERS)
+        self.assertNotIn("NVDA", _server.PAPER_LAST_BUY_PRICE)
+        buy_status, buy_body = build_paper_order_response(json.dumps(next_buy).encode("utf-8"))
+        self.assertEqual(buy_status, 200)
+        self.assertEqual(buy_body["order"]["status"], "filled")
+
+    def test_small_partial_paper_sell_keeps_layer_tracking(self):
+        first_buy = {
+            "symbol": "NVDA",
+            "side": "buy",
+            "quoteAmount": 1000,
+            "price": 100,
+            "orderType": "market",
+        }
+        small_sell = {
+            "symbol": "NVDA",
+            "side": "sell",
+            "quoteAmount": 100,
+            "price": 100,
+            "orderType": "market",
+        }
+
+        build_paper_order_response(json.dumps(first_buy).encode("utf-8"))
+        sell_status, sell_body = build_paper_order_response(json.dumps(small_sell).encode("utf-8"))
+
+        self.assertEqual(sell_status, 200)
+        self.assertEqual(sell_body["order"]["status"], "filled")
+        self.assertEqual(_server.PAPER_T_LAYERS["NVDA"], 1)
+        self.assertEqual(_server.PAPER_LAST_BUY_PRICE["NVDA"], 100)
+
     def test_build_paper_reset_response_clears_account_and_orders(self):
         build_paper_order_response(
             json.dumps(

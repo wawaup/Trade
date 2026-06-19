@@ -30,6 +30,7 @@ PAPER_RISK_LIMITS = RiskLimits(
     max_order_quote=5_000.0,
     max_t_position_quote=7_500.0,
     max_spread_pct=0.005,
+    market_data_max_age_sec=30.0,
     daily_loss_limit_quote=500.0,
 )
 
@@ -181,6 +182,8 @@ def build_paper_order_response(raw_body: bytes):
         intent,
         price=price,
         fee=fee,
+        spread_pct=payload.get("spreadPct"),
+        market_data_age_sec=payload.get("marketDataAgeSec"),
         daily_loss_quote=PAPER_DAILY_LOSS,
     )
 
@@ -205,7 +208,18 @@ def build_paper_order_response(raw_body: bytes):
                 PAPER_POSITION_COST.pop(symbol, None)
             else:
                 sold_cost = fill.filled_qty * avg_cost_per_unit
-                PAPER_POSITION_COST[symbol] = max(0.0, total_cost - sold_cost)
+                remaining_cost = max(0.0, total_cost - sold_cost)
+                PAPER_POSITION_COST[symbol] = remaining_cost
+                current_layers = PAPER_T_LAYERS.get(symbol, 0)
+                sold_quote = fill.filled_qty * price
+                released_layers = int(sold_quote // max(cfg.min_order_quote, 1.0))
+                if released_layers > 0:
+                    remaining_layers = max(0, current_layers - released_layers)
+                    if remaining_layers > 0:
+                        PAPER_T_LAYERS[symbol] = min(remaining_layers, cfg.max_layers)
+                    else:
+                        PAPER_T_LAYERS.pop(symbol, None)
+                        PAPER_LAST_BUY_PRICE.pop(symbol, None)
 
     order = {
         "orderId": f"po-{len(PAPER_ORDER_LOG) + 1:04d}",
