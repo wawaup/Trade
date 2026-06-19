@@ -32,3 +32,10 @@ class Trade:
     fee: float
     reason: str
 
+
+@dataclass(frozen=True)
+class CoreSignal:
+    action: str  # "HOLD", "REDUCE", "EXIT_ALL"
+    reason: str
+    target_allocation_pct: float  # 0.0–1.0; caller compares to current to decide direction
+

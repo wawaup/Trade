@@ -1,7 +1,7 @@
 import unittest
 
 from tradebot.models import Candle
-from tradebot.strategy import StrategyConfig, generate_signal, confidence_sized_quote
+from tradebot.strategy import StrategyConfig, core_position_signal, generate_signal, confidence_sized_quote
 
 
 def candle(ts, open_, high, low, close, volume=1000):
@@ -345,14 +345,17 @@ class StrategyTest(unittest.TestCase):
     def test_signal_vwap_ignores_previous_session_candles(self):
         hour = 3_600_000
         daily = [candle(i, 100 + i, 102 + i, 99 + i, 101 + i) for i in range(25)]
+        # Previous session: prices close to daily[-1].close (≈125, gap ≈3% < 4% threshold)
+        # but with high volume so they would skew VWAP badly if included.
         previous_session = [
-            candle(8 * hour, 210, 212, 209, 211, 1000),
-            candle(9 * hour, 211, 213, 210, 212, 1000),
+            candle(8 * hour, 121, 123, 120, 122, 10_000),
+            candle(9 * hour, 122, 124, 121, 123, 10_000),
         ]
+        # Current session: pull back well below VWAP, then reclaim (1m move kept <5%).
         current_session = [
-            candle(32 * hour, 100, 101, 99, 100, 1000),
-            candle(32 * hour + 60_000, 100, 101, 98, 98, 1000),
-            candle(32 * hour + 120_000, 98, 102.8, 97, 102.8, 1000),
+            candle(32 * hour,            99, 100, 98,   99,   1000),
+            candle(32 * hour + 60_000,   99, 100, 97,   98,   1000),
+            candle(32 * hour + 120_000,  98, 102, 97,  101.5, 1000),
         ]
 
         signal = generate_signal(
@@ -364,6 +367,110 @@ class StrategyTest(unittest.TestCase):
 
         self.assertEqual(signal.action, "BUY")
         self.assertIn("reclaimed VWAP", signal.reason)
+
+
+class CorePositionSignalTest(unittest.TestCase):
+    def _uptrend_daily(self, n=25):
+        return [candle(i, 100 + i, 102 + i, 99 + i, 101 + i) for i in range(n)]
+
+    def _downtrend_daily(self, n=25):
+        # Sustained decline: MA5 will cross below MA10 quickly
+        return [candle(i, 120 - i * 0.8, 121 - i * 0.8, 118 - i * 0.8, 120 - i * 0.8) for i in range(n)]
+
+    def test_hold_at_full_allocation_in_uptrend(self):
+        signal = core_position_signal(self._uptrend_daily(), StrategyConfig())
+        self.assertEqual(signal.action, "HOLD")
+        self.assertAlmostEqual(signal.target_allocation_pct, 1.0)
+
+    def test_reduce_25pct_on_ma5_dead_cross(self):
+        # Build: 20 up days then 6 sharp down days → MA5 < MA10 but close still near MA20
+        daily = [candle(i, 100 + i, 102 + i, 99 + i, 101 + i) for i in range(20)]
+        # 6 down bars that drag MA5 below MA10 but close stays above MA20
+        for j in range(6):
+            p = 120 - j * 0.5  # gentle decline, stays above MA20 ≈ 111
+            daily.append(candle(20 + j, p, p + 1, p - 1, p))
+
+        signal = core_position_signal(daily, StrategyConfig())
+        self.assertEqual(signal.action, "REDUCE")
+        self.assertAlmostEqual(signal.target_allocation_pct, 0.75)
+
+    def test_reduce_to_0_on_3_consecutive_closes_below_ma20(self):
+        # Start uptrend then crash hard: last 3 closes well below MA20
+        daily = [candle(i, 100 + i, 102 + i, 99 + i, 101 + i) for i in range(22)]
+        # Crash: close well below MA20 for 3 bars; MA20 ≈ 111
+        for j in range(3):
+            daily.append(candle(22 + j, 80, 81, 79, 80))
+
+        signal = core_position_signal(daily, StrategyConfig())
+        self.assertEqual(signal.action, "REDUCE")
+        self.assertAlmostEqual(signal.target_allocation_pct, 0.0)
+
+    def test_exit_all_on_catastrophic_single_day_drop(self):
+        # Uptrend then one-day crash of 10%
+        daily = [candle(i, 100 + i, 102 + i, 99 + i, 101 + i) for i in range(24)]
+        last_close = daily[-1].close
+        daily.append(candle(24, last_close, last_close, last_close * 0.88, last_close * 0.88))
+
+        signal = core_position_signal(daily, StrategyConfig(core_catastrophic_pct=0.08))
+        self.assertEqual(signal.action, "EXIT_ALL")
+        self.assertAlmostEqual(signal.target_allocation_pct, 0.0)
+        self.assertIn("catastrophic", signal.reason)
+
+    def test_insufficient_daily_candles_returns_hold(self):
+        daily = [candle(i, 100, 101, 99, 100) for i in range(10)]
+        signal = core_position_signal(daily, StrategyConfig())
+        self.assertEqual(signal.action, "HOLD")
+        self.assertAlmostEqual(signal.target_allocation_pct, 1.0)
+
+
+class OvernightGapTest(unittest.TestCase):
+    # Use realistic timestamps: daily bars close before intraday starts.
+    # Each daily bar spans 60_000 ms; last daily close_time = 24 * 60_000 + 59_999.
+    # Intraday starts at 2_000_000 (well after daily closes).
+    _INTRADAY_START = 2_000_000
+
+    def _uptrend_daily(self, n=25):
+        return [candle(i * 60_000, 100 + i, 102 + i, 99 + i, 101 + i) for i in range(n)]
+
+    def test_overnight_gap_up_blocks_t_buy(self):
+        daily = self._uptrend_daily()
+        last_close = daily[-1].close
+        t0 = self._INTRADAY_START
+        gapped_open = last_close * 1.06  # 6% gap-up
+        intraday = [
+            candle(t0,           gapped_open, gapped_open + 1, gapped_open - 1, gapped_open, 1000),
+            candle(t0 + 60_000,  gapped_open, gapped_open + 2, gapped_open - 1, gapped_open + 1.5, 1200),
+        ]
+        signal = generate_signal(daily, intraday, position_quote=0, config=StrategyConfig())
+        self.assertEqual(signal.action, "HOLD")
+        self.assertIn("overnight gap", signal.reason)
+
+    def test_overnight_gap_down_blocks_t_buy(self):
+        daily = self._uptrend_daily()
+        last_close = daily[-1].close
+        t0 = self._INTRADAY_START
+        gapped_open = last_close * 0.93  # 7% gap-down
+        intraday = [
+            candle(t0,           gapped_open, gapped_open + 1, gapped_open - 2, gapped_open - 1, 1000),
+            candle(t0 + 60_000,  gapped_open - 1, gapped_open, gapped_open - 2, gapped_open - 0.5, 1200),
+        ]
+        signal = generate_signal(daily, intraday, position_quote=0, config=StrategyConfig())
+        self.assertEqual(signal.action, "HOLD")
+        self.assertIn("overnight gap", signal.reason)
+
+    def test_small_gap_does_not_block_buy(self):
+        daily = self._uptrend_daily()
+        last_close = daily[-1].close
+        t0 = self._INTRADAY_START
+        # 1% gap — well below the 4% threshold
+        gapped_open = last_close * 1.01
+        intraday = [
+            candle(t0,            gapped_open, gapped_open + 1, gapped_open - 2, gapped_open - 1.5, 1000),
+            candle(t0 + 60_000,   gapped_open - 1.5, gapped_open, gapped_open - 2, gapped_open - 0.5, 1200),
+            candle(t0 + 120_000,  gapped_open - 0.5, gapped_open + 2, gapped_open - 1, gapped_open + 1.8, 2000),
+        ]
+        signal = generate_signal(daily, intraday, position_quote=0, config=StrategyConfig(momentum_lookback=50))
+        self.assertNotIn("overnight gap", signal.reason)
 
 
 if __name__ == "__main__":

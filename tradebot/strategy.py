@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from tradebot.indicators import atr_pct, daily_trend_state, kdj, macd, session_vwap
-from tradebot.models import Candle, Signal
+from tradebot.indicators import atr_pct, daily_trend_state, kdj, macd, session_vwap, sma
+from tradebot.models import Candle, CoreSignal, Signal
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,8 @@ class StrategyConfig:
     macd_slow: int = 26
     macd_signal: int = 9
     require_macd_histogram_positive: bool = True
+    overnight_gap_pct: float = 0.04
+    core_catastrophic_pct: float = 0.08
 
 
 def generate_signal(
@@ -60,6 +62,12 @@ def generate_signal(
     one_minute_move = abs(current.close / previous.close - 1) if previous.close else 1.0
     if one_minute_move >= config.flash_crash_pct:
         return Signal("HOLD", f"extreme 1m move: {one_minute_move:.2%}", 0.0)
+
+    # Only check overnight gap when intraday data is genuinely newer than the last daily bar.
+    if daily and intraday and daily[-1].close > 0 and intraday[0].open_time >= daily[-1].close_time:
+        gap = abs(intraday[0].open / daily[-1].close - 1)
+        if gap >= config.overnight_gap_pct:
+            return Signal("HOLD", f"overnight gap {gap:.2%} exceeds {config.overnight_gap_pct:.2%}", 0.1)
 
     if position_quote > 0 and avg_entry_price:
         pnl_pct = current.close / avg_entry_price - 1
@@ -153,6 +161,64 @@ def confidence_sized_quote(base_quote: float, confidence: float, floor: float) -
     """
     scale = max(floor, min(confidence / 0.9, 1.0))
     return base_quote * scale
+
+
+def core_position_signal(daily: list[Candle], config: StrategyConfig) -> CoreSignal:
+    """4-tier gradual core-position exit trigger (Plan B).
+
+    Returns the TARGET allocation pct (0.0–1.0) for the core position.
+    Caller compares this to the current allocation to decide how much to buy/sell.
+
+    Exit tiers (most severe first):
+      Catastrophic drop ≥ core_catastrophic_pct → EXIT_ALL (target=0.0) immediately.
+      3+ consecutive closes below MA20              → target=0.0 (full exit)
+      MA5 dead-cross + below MA20 + MACD dead-cross → target=0.25
+      MA5 dead-cross + below MA20                   → target=0.50
+      MA5 dead-cross only                           → target=0.75
+      No triggers                                   → HOLD  (target=1.0)
+    """
+    if len(daily) < 20:
+        return CoreSignal("HOLD", "not enough daily candles", 1.0)
+
+    closes = [c.close for c in daily]
+    ma5 = sma(closes, 5)
+    ma10 = sma(closes, 10)
+    ma20 = sma(closes, 20)
+    if ma5 is None or ma10 is None or ma20 is None:
+        return CoreSignal("HOLD", "missing MAs", 1.0)
+
+    current_close = closes[-1]
+    prev_close = closes[-2]
+
+    # Catastrophic single-day drop (瀑布式大跌)
+    if prev_close > 0:
+        daily_drop = current_close / prev_close - 1
+        if daily_drop <= -config.core_catastrophic_pct:
+            return CoreSignal("EXIT_ALL", f"catastrophic daily drop: {daily_drop:.2%}", 0.0)
+
+    # Consecutive closes below MA20
+    consec_below = 0
+    for c in reversed(closes):
+        if c < ma20:
+            consec_below += 1
+        else:
+            break
+
+    macd_result = macd(daily, config.macd_fast, config.macd_slow, config.macd_signal)
+    macd_negative = macd_result is not None and macd_result[2] < 0
+    dead_cross = ma5 < ma10
+    below_ma20 = current_close < ma20
+
+    if consec_below >= 3:
+        return CoreSignal("REDUCE", f"{consec_below} consecutive closes below MA20 → full exit", 0.0)
+    if dead_cross and below_ma20 and macd_negative:
+        return CoreSignal("REDUCE", "MA5 dead-cross + below MA20 + MACD dead-cross → 75% exit", 0.25)
+    if dead_cross and below_ma20:
+        return CoreSignal("REDUCE", "MA5 dead-cross + below MA20 → 50% exit", 0.50)
+    if dead_cross:
+        return CoreSignal("REDUCE", "MA5 dead-cross → 25% exit", 0.75)
+
+    return CoreSignal("HOLD", f"trend={daily_trend_state(daily)}, no core exit trigger", 1.0)
 
 
 def has_strong_momentum(intraday: list[Candle], day_vwap: float, config: StrategyConfig) -> bool:

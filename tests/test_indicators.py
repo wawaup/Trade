@@ -148,24 +148,24 @@ class IndicatorTests(unittest.TestCase):
         hour = 3_600_000
         daily = [full_candle(i, 100 + i, 102 + i, 99 + i, 101 + i) for i in range(25)]
 
-        # Pre-market candles with a very different price level that would
-        # skew VWAP badly if included.  With reset_utc_hour=13 they must be
-        # excluded so that the active-session VWAP sits near 100, not 200+.
+        # Pre-market candles at high volume but plausible prices (gap ≈1.6% < 4% threshold).
+        # If included, their volume dominates VWAP and reclaim would fail (VWAP ≈ 118).
+        # With reset_utc_hour=13, they are excluded → VWAP ≈ 100 → reclaim succeeds.
         pre_market = [
-            full_candle(37 * hour - 120_000, 210, 212, 209, 211, 5000),
-            full_candle(37 * hour - 60_000,  210, 213, 210, 212, 5000),
+            full_candle(37 * hour - 120_000, 123, 124, 122, 123, 5000),
+            full_candle(37 * hour - 60_000,  123, 125, 122, 124, 5000),
         ]
         active = [
             full_candle(37 * hour,            100, 101, 99,  100, 1000),
-            full_candle(37 * hour + 60_000,   100, 101, 98,  98,  1000),
-            full_candle(37 * hour + 120_000,  98,  103, 97,  102, 1000),
+            full_candle(37 * hour + 60_000,   100, 101, 98,   98, 1000),
+            full_candle(37 * hour + 120_000,   98, 103, 97,  102, 1000),
         ]
 
         config = StrategyConfig(session_reset_utc_hour=13, momentum_lookback=50)
         signal = generate_signal(daily, pre_market + active, position_quote=0, config=config)
 
-        # If pre-market candles were included, VWAP ≈ 155 and reclaim would fail.
-        # Correct behaviour: VWAP ≈ 100, reclaim succeeds → BUY.
+        # If pre-market candles were included, their high volume pushes VWAP to ≈118 → no reclaim.
+        # Correct behaviour: VWAP ≈ 100 (session-only), reclaim succeeds → BUY.
         self.assertEqual(signal.action, "BUY")
         self.assertIn("reclaimed VWAP", signal.reason)
 
