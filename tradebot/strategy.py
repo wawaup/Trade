@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from tradebot.indicators import atr_pct, daily_trend_state, session_vwap
+from tradebot.indicators import atr_pct, daily_trend_state, kdj, session_vwap
 from tradebot.models import Candle, Signal
 
 
@@ -28,6 +28,9 @@ class StrategyConfig:
     max_layers: int = 3
     session_reset_utc_hour: int = 13
     confidence_size_floor: float = 0.5
+    kdj_period: int = 9
+    kdj_signal_smooth: int = 3
+    kdj_overbought_threshold: float = 80.0
 
 
 def generate_signal(
@@ -69,6 +72,12 @@ def generate_signal(
 
     if trend == "broken":
         return Signal("HOLD", "daily trend broken; pause new T buys", 0.1)
+
+    kdj_result = kdj(intraday, config.kdj_period, config.kdj_signal_smooth)
+    if kdj_result is not None:
+        _, _, j_value = kdj_result
+        if j_value > config.kdj_overbought_threshold:
+            return Signal("HOLD", f"KDJ overbought: J={j_value:.1f}", 0.2)
 
     recent = intraday[-config.pullback_lookback :]
     previous_was_pullback = any(c.close <= day_vwap * (1 - config.pullback_pct) for c in recent[:-1])

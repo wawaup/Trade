@@ -1,7 +1,7 @@
 import unittest
 
 from tradebot.models import Candle
-from tradebot.strategy import StrategyConfig, generate_signal
+from tradebot.strategy import StrategyConfig, generate_signal, confidence_sized_quote
 
 
 def candle(ts, open_, high, low, close, volume=1000):
@@ -157,6 +157,45 @@ class StrategyTest(unittest.TestCase):
 
         self.assertEqual(signal.action, "SELL")
         self.assertIn("dynamic profit target", signal.reason)
+
+    def test_kdj_overbought_blocks_buy_signal(self):
+        # Uptrend + valid pullback reclaim, but intraday price stays near its high
+        # the whole time → KDJ J > 80 → strategy should HOLD instead of BUY.
+        daily = [candle(i, 100 + i, 102 + i, 99 + i, 101 + i) for i in range(25)]
+        # All intraday closes at the top of their range so J will be well above 80.
+        intraday = [
+            Candle(
+                open_time=i, open=120 + i, high=120 + i, low=118 + i, close=120 + i,
+                volume=1000, close_time=i + 59999, quote_volume=(120 + i) * 1000, trades=100,
+            )
+            for i in range(20)
+        ]
+
+        signal = generate_signal(daily, intraday, position_quote=0, config=StrategyConfig())
+
+        self.assertEqual(signal.action, "HOLD")
+        self.assertIn("KDJ overbought", signal.reason)
+
+    def test_kdj_overbought_does_not_block_sell_signal(self):
+        # Even when J > 80, existing T position must still be able to hit take-profit.
+        daily = [candle(i, 100 + i, 102 + i, 99 + i, 101 + i) for i in range(25)]
+        intraday = [
+            Candle(
+                open_time=i, open=120 + i, high=120 + i, low=118 + i, close=120 + i,
+                volume=1000, close_time=i + 59999, quote_volume=(120 + i) * 1000, trades=100,
+            )
+            for i in range(20)
+        ]
+
+        signal = generate_signal(
+            daily, intraday,
+            position_quote=400,
+            avg_entry_price=110,  # pnl ≈ +8.5%, well above take_profit_pct
+            config=StrategyConfig(take_profit_pct=0.015),
+        )
+
+        self.assertEqual(signal.action, "SELL")
+        self.assertIn("profit target", signal.reason)
 
     def test_confidence_scales_suggested_quote_below_base(self):
         # Uptrend pullback with low ATR → confidence ≈ 0.55, floor=0.5 → quote < base 350.

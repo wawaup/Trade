@@ -49,6 +49,40 @@ def atr_pct(candles: Sequence[Candle], period: int = 14) -> Optional[float]:
     return (sum(true_ranges) / period) / latest_close
 
 
+def kdj(
+    candles: Sequence[Candle],
+    period: int = 9,
+    signal_smooth: int = 3,
+) -> Optional[tuple[float, float, float]]:
+    """Return (K, D, J) for the latest bar using standard EMA-based KDJ.
+
+    For each bar i:
+      RSV_i = (close_i - min_low_period) / (max_high_period - min_low_period) * 100
+      K_i   = (1 - alpha) * K_{i-1} + alpha * RSV_i   where alpha = 1 / signal_smooth
+      D_i   = (1 - alpha) * D_{i-1} + alpha * K_i
+      J_i   = 3 * K_i - 2 * D_i
+
+    K and D are initialised at 50 (neutral).  Returns None when fewer than
+    `period` candles are available.
+    """
+    if len(candles) < period:
+        return None
+
+    alpha = 1.0 / signal_smooth
+    k, d = 50.0, 50.0
+
+    for i in range(len(candles)):
+        win = candles[max(0, i - period + 1) : i + 1]
+        lo = min(c.low for c in win)
+        hi = max(c.high for c in win)
+        rsv = 50.0 if hi == lo else (candles[i].close - lo) / (hi - lo) * 100
+        k = (1 - alpha) * k + alpha * rsv
+        d = (1 - alpha) * d + alpha * k
+
+    j = 3 * k - 2 * d
+    return k, d, j
+
+
 def daily_trend_state(daily: Sequence[Candle]) -> str:
     closes = [c.close for c in daily]
     ma5 = sma(closes, 5)

@@ -1,6 +1,6 @@
 import unittest
 
-from tradebot.indicators import session_vwap
+from tradebot.indicators import kdj, session_vwap
 from tradebot.models import Candle
 
 
@@ -16,6 +16,56 @@ def candle(ts, close, volume=1000):
         quote_volume=volume * close,
         trades=100,
     )
+
+
+class KDJTests(unittest.TestCase):
+    def test_returns_none_when_fewer_than_period_candles(self):
+        cs = [candle(i, 100) for i in range(8)]
+        self.assertIsNone(kdj(cs, period=9))
+
+    def test_j_above_80_when_price_consistently_near_high(self):
+        # All closes at the top of their range → RSV near 100 → J should be well above 80.
+        closes = [100 + i for i in range(20)]
+        cs = [
+            Candle(
+                open_time=i, open=c, high=c, low=c - 4, close=c,
+                volume=1000, close_time=i + 59999, quote_volume=c * 1000, trades=100,
+            )
+            for i, c in enumerate(closes)
+        ]
+        result = kdj(cs)
+        self.assertIsNotNone(result)
+        k, d, j = result
+        self.assertGreater(j, 80)
+
+    def test_j_below_20_when_price_consistently_near_low(self):
+        # All closes at the bottom of their range → RSV near 0 → J should be well below 20.
+        closes = [100 - i for i in range(20)]
+        cs = [
+            Candle(
+                open_time=i, open=c, high=c + 4, low=c, close=c,
+                volume=1000, close_time=i + 59999, quote_volume=c * 1000, trades=100,
+            )
+            for i, c in enumerate(closes)
+        ]
+        result = kdj(cs)
+        self.assertIsNotNone(result)
+        k, d, j = result
+        self.assertLess(j, 20)
+
+    def test_j_near_50_when_price_at_midrange(self):
+        cs = [
+            Candle(
+                open_time=i, open=100, high=110, low=90, close=100,
+                volume=1000, close_time=i + 59999, quote_volume=100_000, trades=100,
+            )
+            for i in range(20)
+        ]
+        result = kdj(cs)
+        self.assertIsNotNone(result)
+        _, _, j = result
+        self.assertGreater(j, 30)
+        self.assertLess(j, 70)
 
 
 class IndicatorTests(unittest.TestCase):
