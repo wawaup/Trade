@@ -15,7 +15,7 @@
 #   第四层：ATR 动态止损，分层止盈 1.8%/1.4%/1.0%
 
 def on_init(ctx):
-    ctx.state = {'layers': 0}
+    ctx.state = {'layers': 0, 'entry_stop_pct': None}
 
 def on_bar(ctx, bar):
     # ── 参数 ──────────────────────────────────────────────
@@ -67,7 +67,7 @@ def on_bar(ctx, bar):
         w = blist[-min(n, len(blist)):]
         tv = sum(b.volume for b in w)
         if tv <= 0:
-            return bar.close
+            return blist[-1].close
         return sum((b.high + b.low + b.close) / 3 * b.volume for b in w) / tv
 
     def _kdj(blist, period=9, smooth=3):
@@ -113,10 +113,10 @@ def on_bar(ctx, bar):
         return
 
     vwap = _session_vwap(bars, session_n)
-    kval, dval, jval = _kdj(bars[-30:])
+    kval, dval, jval = _kdj(bars[-100:])
 
-    ema12 = _ema(closes[-50:], 12)
-    ema26 = _ema(closes[-50:], 26)
+    ema12 = _ema(closes[-60:], 12)
+    ema26 = _ema(closes[-60:], 26)
     macd_positive = (ema12 is not None and ema26 is not None and ema12 > ema26)
 
     avg_vol   = sum(volumes[-20:]) / max(1, min(20, len(volumes)))
@@ -131,10 +131,11 @@ def on_bar(ctx, bar):
             entry = bar.close
         pnl = (bar.close - entry) / entry
 
-        stop = daily_atr * atr_sl_mult
+        stop = ctx.state.get('entry_stop_pct') or daily_atr * atr_sl_mult
         if pnl <= -stop:
             ctx.close_position()
             ctx.state['layers'] = 0
+            ctx.state['entry_stop_pct'] = None
             ctx.log(f"STOP pnl={pnl:.2%} <= -{stop:.2%}")
             return
 
@@ -143,10 +144,11 @@ def on_bar(ctx, bar):
         if pnl >= tp:
             ctx.close_position()
             ctx.state['layers'] = 0
+            ctx.state['entry_stop_pct'] = None
             ctx.log(f"TP layer={layers} pnl={pnl:.2%}")
             return
 
-        if layers < max_layers and trend == 'up' and vol_spike and pnl < 0.005:
+        if layers < max_layers and trend == 'up' and vol_spike and 0 < pnl < 0.01:
             ctx.buy(reason=f"add layer {layers+1}")
             ctx.state['layers'] = layers + 1
             ctx.log(f"ADD layer={layers+1}")
@@ -165,9 +167,11 @@ def on_bar(ctx, bar):
     if vwap_reclaim and j_ok and vol_spike:
         ctx.buy(reason="vwap_reclaim")
         ctx.state['layers'] = 1
+        ctx.state['entry_stop_pct'] = daily_atr * atr_sl_mult
         _j_str = f"{jval:.1f}" if jval is not None else "N/A"
         ctx.log(f"BUY vwap_reclaim j={_j_str}")
     elif momentum and j_ok:
         ctx.buy(reason="momentum")
         ctx.state['layers'] = 1
+        ctx.state['entry_stop_pct'] = daily_atr * atr_sl_mult
         ctx.log(f"BUY momentum macd={macd_positive}")
