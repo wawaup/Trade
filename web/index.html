@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Trade QuantDinger Desk</title>
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=20260619-layout">
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -285,6 +285,10 @@ order_intent = signal_to_order_intent(
                 <section class="surface-panel">
                   <h3>Strategy Logs</h3>
                   <pre id="terminalLog" class="terminal"></pre>
+                </section>
+                <section class="surface-panel">
+                  <h3>保护规则</h3>
+                  <ul id="guardrails" class="guardrails"></ul>
                 </section>
               </div>
             </section>

@@ -32,6 +32,7 @@ class FrontendFilesTest(unittest.TestCase):
         self.assertIn("totalAccountQuote", html)
         self.assertIn("K线 / VWAP 主视窗", html)
         self.assertIn("风控指示灯", html)
+        self.assertIn('id="guardrails"', html)
         self.assertIn("lightweight-charts", html)
         self.assertNotIn("chart-candles", html)
         self.assertIn('tbody id="paperOrderRows"', html)

@@ -159,7 +159,7 @@ h4 { margin-bottom: var(--space-sm); color: var(--muted); font-size: 0.82rem; }
 
 .qd-ide-grid {
   display: grid;
-  grid-template-columns: 370px minmax(620px, 1fr) 360px;
+  grid-template-columns: minmax(280px, 0.82fr) minmax(0, 1.42fr) minmax(260px, 0.72fr);
   gap: 0;
   min-height: calc(100vh - 108px);
   border: 1px solid oklch(0.18 0.006 240);
@@ -185,6 +185,10 @@ h4 { margin-bottom: var(--space-sm); color: var(--muted); font-size: 0.82rem; }
   display: grid;
   grid-template-rows: auto minmax(360px, 0.95fr) auto minmax(220px, 0.65fr);
   gap: var(--space-md);
+}
+
+.qd-market-stage > * {
+  min-width: 0;
 }
 
 .qd-quick-trade {
@@ -259,7 +263,7 @@ h4 { margin-bottom: var(--space-sm); color: var(--muted); font-size: 0.82rem; }
 
 .qd-control-strip {
   display: grid;
-  grid-template-columns: minmax(230px, 0.7fr) auto auto;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
   gap: var(--space-md);
   align-items: center;
 }
@@ -324,7 +328,7 @@ h4 { margin-bottom: var(--space-sm); color: var(--muted); font-size: 0.82rem; }
 
 .qd-param-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(220px, 0.8fr) minmax(220px, 0.8fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-md);
 }
 
@@ -729,10 +733,13 @@ th {
     grid-template-columns: 210px minmax(0, 1fr);
   }
   .qd-ide-grid {
-    grid-template-columns: minmax(300px, 0.65fr) minmax(520px, 1fr);
+    grid-template-columns: 1fr;
+  }
+  .qd-code-panel {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
   }
   .qd-quick-trade {
-    grid-column: 1 / -1;
     border-left: 0;
     border-top: 1px solid var(--line);
   }
