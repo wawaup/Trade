@@ -293,9 +293,17 @@ def build_backtest_response(raw_body: bytes):
     selected = [profile for profile in all_profiles if not symbols or profile.symbol in symbols]
     if symbols and not selected:
         selected = [AssetProfile(symbol, "自定义标的", 30, 20) for symbol in symbols]
+    total_quote = float(payload.get("totalQuote", 0) or 0)
+    per_symbol_quote = float(payload.get("perSymbolQuote", 0) or 0)
+    idle_buffer_pct = float(payload.get("idleBufferPct", 0.0) or 0.0)
+    if per_symbol_quote > 0:
+        per_asset_quote = per_symbol_quote
+    elif total_quote > 0:
+        per_asset_quote = total_quote * (1.0 - idle_buffer_pct) / max(len(selected), 1)
+    else:
+        per_asset_quote = 15_000 / max(len(selected), 1)
     data_source = DataSourceFactory.get_source(source)
     asset_results = []
-    per_asset_quote = 15_000 / len(selected) if selected else 0.0
     for profile in selected:
         try:
             daily, intraday = data_source.get_default_candles(

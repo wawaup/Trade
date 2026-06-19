@@ -258,6 +258,28 @@ class ServerTest(unittest.TestCase):
             self.assertIn("riskEvents", row)
             self.assertIn("executionAssumptions", row)
 
+    def test_backtest_uses_per_symbol_quote_when_provided(self):
+        status, body = build_backtest_response(
+            json.dumps({"symbols": ["NVDA"], "source": "Synthetic", "perSymbolQuote": 600}).encode("utf-8")
+        )
+        self.assertEqual(status, 200)
+        # The config snapshot should reflect the provided per-symbol quote
+        config = body["backtest"]["configSnapshot"]
+        self.assertAlmostEqual(config["startingQuote"], 600.0)
+
+    def test_backtest_uses_total_quote_with_idle_buffer(self):
+        # totalQuote=2000, idleBufferPct=0.1, 1 symbol → perAsset = 2000*0.9 = 1800
+        status, body = build_backtest_response(
+            json.dumps({
+                "symbols": ["NVDA"],
+                "source": "Synthetic",
+                "totalQuote": 2000,
+                "idleBufferPct": 0.1,
+            }).encode("utf-8")
+        )
+        self.assertEqual(status, 200)
+        self.assertAlmostEqual(body["backtest"]["configSnapshot"]["startingQuote"], 1800.0)
+
     def test_backtest_response_rejects_unknown_data_source(self):
         status, body = build_backtest_response(
             json.dumps({"symbols": ["NVDA"], "source": "mystery"}).encode("utf-8")
