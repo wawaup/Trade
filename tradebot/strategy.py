@@ -21,6 +21,7 @@ class StrategyConfig:
     layer2_take_profit_pct: float = 0.014
     layer3_take_profit_pct: float = 0.010
     stop_loss_pct: float = 0.035
+    atr_stop_loss_multiplier: float = 1.5
     min_daily_atr_pct: float = 0.018
     buy_grid_spacing_pct: float = 0.012
     flash_crash_pct: float = 0.05
@@ -57,8 +58,13 @@ def generate_signal(
         target = dynamic_take_profit_pct(layers, config)
         if pnl_pct >= target:
             return Signal("SELL", f"dynamic profit target hit: {pnl_pct:.2%} >= {target:.2%}", 0.8)
-        if pnl_pct <= -config.stop_loss_pct:
-            return Signal("SELL", f"t bucket stop loss hit: {pnl_pct:.2%}", 0.7)
+        effective_stop = (
+            daily_atr * config.atr_stop_loss_multiplier
+            if daily_atr > 0
+            else config.stop_loss_pct
+        )
+        if pnl_pct <= -effective_stop:
+            return Signal("SELL", f"t bucket stop loss hit: {pnl_pct:.2%} (stop={effective_stop:.2%})", 0.7)
 
     if trend == "broken":
         return Signal("HOLD", "daily trend broken; pause new T buys", 0.1)

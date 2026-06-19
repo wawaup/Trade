@@ -156,6 +156,51 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(signal.action, "SELL")
         self.assertIn("dynamic profit target", signal.reason)
 
+    def test_stop_loss_uses_atr_multiplier_when_atr_available(self):
+        # Daily candles have TR=3 per bar, close≈125 → ATR% ≈ 2.4%.
+        # atr_stop_loss_multiplier=1.5 → effective stop ≈ 3.6%.
+        # Entry at 100, close at 96.0 → pnl = -4%, beyond 3.6% stop → SELL.
+        daily = [
+            candle(i, 100 + i, 102 + i, 99 + i, 101 + i)
+            for i in range(25)
+        ]
+        intraday = [
+            candle(1, 100, 101, 99, 100, 1000),
+            candle(2, 100, 101, 99, 96.0, 1200),
+        ]
+
+        signal = generate_signal(
+            daily,
+            intraday,
+            position_quote=400,
+            avg_entry_price=100,
+            config=StrategyConfig(atr_stop_loss_multiplier=1.5),
+        )
+
+        self.assertEqual(signal.action, "SELL")
+        self.assertIn("stop loss", signal.reason)
+        self.assertIn("stop=", signal.reason)
+
+    def test_stop_loss_falls_back_to_fixed_when_daily_atr_is_zero(self):
+        # All daily candles have identical open/high/low/close → ATR = 0.
+        # Fall back to stop_loss_pct=0.03; entry 100, close 96.5 → pnl -3.5% → SELL.
+        daily = [candle(i, 100, 100, 100, 100) for i in range(25)]
+        intraday = [
+            candle(1, 100, 101, 99, 100, 1000),
+            candle(2, 100, 101, 99, 96.5, 1200),
+        ]
+
+        signal = generate_signal(
+            daily,
+            intraday,
+            position_quote=400,
+            avg_entry_price=100,
+            config=StrategyConfig(stop_loss_pct=0.03, atr_stop_loss_multiplier=1.5),
+        )
+
+        self.assertEqual(signal.action, "SELL")
+        self.assertIn("stop loss", signal.reason)
+
     def test_rejects_extreme_one_minute_spike(self):
         daily = [candle(i, 100 + i, 102 + i, 99 + i, 101 + i) for i in range(25)]
         intraday = [
