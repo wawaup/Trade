@@ -1,6 +1,6 @@
 import unittest
 
-from tradebot.indicators import kdj, session_vwap
+from tradebot.indicators import kdj, macd, session_vwap
 from tradebot.models import Candle
 
 
@@ -66,6 +66,35 @@ class KDJTests(unittest.TestCase):
         _, _, j = result
         self.assertGreater(j, 30)
         self.assertLess(j, 70)
+
+
+class MACDTests(unittest.TestCase):
+    def _rising(self, n=60):
+        return [candle(i, 100 + i * 0.5) for i in range(n)]
+
+    def _falling(self, n=60):
+        return [candle(i, 160 - i * 0.5) for i in range(n)]
+
+    def test_returns_none_when_not_enough_candles(self):
+        self.assertIsNone(macd([candle(i, 100) for i in range(34)]))
+
+    def test_histogram_positive_in_sustained_uptrend(self):
+        result = macd(self._rising())
+        self.assertIsNotNone(result)
+        _, _, hist = result
+        self.assertGreater(hist, 0)
+
+    def test_histogram_negative_in_sustained_downtrend(self):
+        result = macd(self._falling())
+        self.assertIsNotNone(result)
+        _, _, hist = result
+        self.assertLess(hist, 0)
+
+    def test_macd_line_equals_fast_minus_slow_ema_direction(self):
+        # In an uptrend fast EMA > slow EMA → macd_line > 0.
+        result = macd(self._rising())
+        macd_line, _, _ = result
+        self.assertGreater(macd_line, 0)
 
 
 class IndicatorTests(unittest.TestCase):

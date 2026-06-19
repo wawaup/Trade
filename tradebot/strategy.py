@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from tradebot.indicators import atr_pct, daily_trend_state, kdj, session_vwap
+from tradebot.indicators import atr_pct, daily_trend_state, kdj, macd, session_vwap
 from tradebot.models import Candle, Signal
 
 
@@ -31,6 +31,10 @@ class StrategyConfig:
     kdj_period: int = 9
     kdj_signal_smooth: int = 3
     kdj_overbought_threshold: float = 80.0
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+    require_macd_histogram_positive: bool = True
 
 
 def generate_signal(
@@ -78,6 +82,13 @@ def generate_signal(
         _, _, j_value = kdj_result
         if j_value > config.kdj_overbought_threshold:
             return Signal("HOLD", f"KDJ overbought: J={j_value:.1f}", 0.2)
+
+    if config.require_macd_histogram_positive:
+        macd_result = macd(daily, config.macd_fast, config.macd_slow, config.macd_signal)
+        if macd_result is not None:
+            _, _, histogram = macd_result
+            if histogram < 0:
+                return Signal("HOLD", f"MACD histogram negative: {histogram:.4f}", 0.2)
 
     recent = intraday[-config.pullback_lookback :]
     previous_was_pullback = any(c.close <= day_vwap * (1 - config.pullback_pct) for c in recent[:-1])

@@ -83,6 +83,70 @@ def kdj(
     return k, d, j
 
 
+def ema(values: Sequence[float], period: int) -> Optional[float]:
+    """Exponential moving average of the last element, seeded from the first SMA."""
+    if len(values) < period:
+        return None
+    seed = sum(values[:period]) / period
+    alpha = 2.0 / (period + 1)
+    result = seed
+    for v in values[period:]:
+        result = alpha * v + (1 - alpha) * result
+    return result
+
+
+def macd(
+    candles: Sequence[Candle],
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> Optional[tuple[float, float, float]]:
+    """Return (macd_line, signal_line, histogram) for the latest bar.
+
+    macd_line = EMA(fast) - EMA(slow)
+    signal_line = EMA(macd_line, signal)
+    histogram   = macd_line - signal_line
+
+    Positive histogram → short-term momentum accelerating upward.
+    Returns None when there are not enough candles.
+    """
+    if len(candles) < slow + signal:
+        return None
+
+    closes = [c.close for c in candles]
+    alpha_fast = 2.0 / (fast + 1)
+    alpha_slow = 2.0 / (slow + 1)
+    alpha_sig = 2.0 / (signal + 1)
+
+    # Seed EMAs from the first SMA
+    ema_fast = sum(closes[:fast]) / fast
+    ema_slow = sum(closes[:slow]) / slow
+
+    macd_values: list[float] = []
+    for i, close in enumerate(closes):
+        if i < slow:
+            # Keep seeding slow EMA; fast EMA is already valid after `fast` bars
+            if i >= fast:
+                ema_fast = alpha_fast * close + (1 - alpha_fast) * ema_fast
+            ema_slow = alpha_slow * close + (1 - alpha_slow) * ema_slow
+        else:
+            ema_fast = alpha_fast * close + (1 - alpha_fast) * ema_fast
+            ema_slow = alpha_slow * close + (1 - alpha_slow) * ema_slow
+            macd_values.append(ema_fast - ema_slow)
+
+    if len(macd_values) < signal:
+        return None
+
+    # Signal line: EMA of macd_values
+    sig_line = sum(macd_values[:signal]) / signal
+    for mv in macd_values[signal:]:
+        sig_line = alpha_sig * mv + (1 - alpha_sig) * sig_line
+
+    macd_line = macd_values[-1]
+    histogram = macd_line - sig_line
+    return macd_line, sig_line, histogram
+
+
 def daily_trend_state(daily: Sequence[Candle]) -> str:
     closes = [c.close for c in daily]
     ma5 = sma(closes, 5)
