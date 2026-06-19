@@ -30,7 +30,14 @@ PAPER_RISK_LIMITS = RiskLimits(
     max_order_quote=5_000.0,
     max_t_position_quote=7_500.0,
     max_spread_pct=0.005,
+    daily_loss_limit_quote=500.0,
 )
+
+# Per-symbol T-position tracking for grid spacing and layer checks.
+PAPER_LAST_BUY_PRICE: dict[str, float] = {}
+PAPER_T_LAYERS: dict[str, int] = {}
+PAPER_POSITION_COST: dict[str, float] = {}  # total cost basis per symbol
+PAPER_DAILY_LOSS: float = 0.0               # accumulated realized loss today (UTC day)
 
 
 def build_static_state():
@@ -109,6 +116,8 @@ def _latest_synthetic_price(symbol: str) -> float:
 
 
 def build_paper_order_response(raw_body: bytes):
+    global PAPER_DAILY_LOSS
+
     try:
         payload = json.loads(raw_body.decode("utf-8"))
         symbol = str(payload.get("symbol", "NVDA")).upper()
@@ -124,6 +133,37 @@ def build_paper_order_response(raw_body: bytes):
     if order_type != "market":
         return 400, {"error": "only market paper orders are enabled"}
 
+    # --- Server-side risk checks (not delegated to caller) ---
+    cfg = StrategyConfig()
+    if side == "buy":
+        last_price = PAPER_LAST_BUY_PRICE.get(symbol)
+        if last_price is not None and price > last_price * (1 - cfg.buy_grid_spacing_pct):
+            reason = f"grid spacing not reached (last={last_price:.4f}, now={price:.4f})"
+            order = {
+                "orderId": f"po-{len(PAPER_ORDER_LOG) + 1:04d}",
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+                "symbol": symbol, "side": side, "orderType": order_type,
+                "quoteAmount": quote_amount, "price": price,
+                "filledQty": 0.0, "fee": 0.0, "status": "rejected", "reason": reason,
+                "paperOnly": True, "sourceSignal": "OPEN_T",
+            }
+            PAPER_ORDER_LOG.append(order)
+            return 200, {"order": order, "account": build_paper_orders_response()[1]["account"]}
+
+        layers = PAPER_T_LAYERS.get(symbol, 0)
+        if layers >= cfg.max_layers:
+            reason = f"max layers reached ({layers})"
+            order = {
+                "orderId": f"po-{len(PAPER_ORDER_LOG) + 1:04d}",
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+                "symbol": symbol, "side": side, "orderType": order_type,
+                "quoteAmount": quote_amount, "price": price,
+                "filledQty": 0.0, "fee": 0.0, "status": "rejected", "reason": reason,
+                "paperOnly": True, "sourceSignal": "OPEN_T",
+            }
+            PAPER_ORDER_LOG.append(order)
+            return 200, {"order": order, "account": build_paper_orders_response()[1]["account"]}
+
     quantity = quote_amount / price if side == "sell" and quote_amount > 0 else 0.0
     intent = OrderIntent(
         symbol=symbol,
@@ -136,14 +176,37 @@ def build_paper_order_response(raw_body: bytes):
         reduce_only=side == "sell",
         paper_only=True,
     )
+    fee = max(0.0, quote_amount * 0.001)
     fill = PaperExecutionAdapter(PAPER_ACCOUNT, PAPER_RISK_LIMITS).execute(
         intent,
         price=price,
-        fee=max(0.0, quote_amount * 0.001),
-        spread_pct=payload.get("spreadPct"),
-        market_data_age_sec=payload.get("marketDataAgeSec"),
-        daily_loss_quote=payload.get("dailyLossQuote"),
+        fee=fee,
+        daily_loss_quote=PAPER_DAILY_LOSS,
     )
+
+    # --- Update server-side tracking state after a successful fill ---
+    if fill.status == "filled":
+        if side == "buy":
+            PAPER_LAST_BUY_PRICE[symbol] = price
+            PAPER_T_LAYERS[symbol] = PAPER_T_LAYERS.get(symbol, 0) + 1
+            PAPER_POSITION_COST[symbol] = PAPER_POSITION_COST.get(symbol, 0.0) + quote_amount
+        elif side == "sell" and fill.filled_qty > 0:
+            total_cost = PAPER_POSITION_COST.get(symbol, 0.0)
+            total_qty = PAPER_ACCOUNT.positions.get(symbol, 0.0) + fill.filled_qty
+            avg_cost_per_unit = total_cost / total_qty if total_qty > 0 else price
+            pnl = fill.filled_qty * price - fill.filled_qty * avg_cost_per_unit - fill.fee
+            if pnl < 0:
+                PAPER_DAILY_LOSS += abs(pnl)
+            # Reset position tracking if fully closed
+            remaining_qty = PAPER_ACCOUNT.positions.get(symbol, 0.0)
+            if remaining_qty <= 0:
+                PAPER_LAST_BUY_PRICE.pop(symbol, None)
+                PAPER_T_LAYERS.pop(symbol, None)
+                PAPER_POSITION_COST.pop(symbol, None)
+            else:
+                sold_cost = fill.filled_qty * avg_cost_per_unit
+                PAPER_POSITION_COST[symbol] = max(0.0, total_cost - sold_cost)
+
     order = {
         "orderId": f"po-{len(PAPER_ORDER_LOG) + 1:04d}",
         "createdAt": datetime.now(timezone.utc).isoformat(),
@@ -172,9 +235,14 @@ def build_paper_reset_response(raw_body: bytes = b""):
     if cash < 0:
         return 400, {"error": "cash must be non-negative"}
 
+    global PAPER_DAILY_LOSS
     PAPER_ACCOUNT.cash = cash
     PAPER_ACCOUNT.positions.clear()
     PAPER_ORDER_LOG.clear()
+    PAPER_LAST_BUY_PRICE.clear()
+    PAPER_T_LAYERS.clear()
+    PAPER_POSITION_COST.clear()
+    PAPER_DAILY_LOSS = 0.0
     return build_paper_orders_response()
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from tradebot.data import write_candles_csv
 from tradebot.data_sources import DataSourceFactory
 from tradebot.models import Candle
+import tradebot.server as _server
 from tradebot.server import (
     BACKTEST_RESULTS,
     BACKTEST_STORE,
@@ -44,6 +45,10 @@ class ServerTest(unittest.TestCase):
         PAPER_ORDER_LOG.clear()
         PAPER_ACCOUNT.cash = 10_000.0
         PAPER_ACCOUNT.positions.clear()
+        _server.PAPER_LAST_BUY_PRICE.clear()
+        _server.PAPER_T_LAYERS.clear()
+        _server.PAPER_POSITION_COST.clear()
+        _server.PAPER_DAILY_LOSS = 0.0
 
     def test_build_config_response_accepts_allocation_payload(self):
         payload = {
