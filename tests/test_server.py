@@ -1,5 +1,7 @@
 import json
+import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -12,6 +14,9 @@ from tradebot.server import (
     BACKTEST_STORE,
     PAPER_ACCOUNT,
     PAPER_ORDER_LOG,
+    api_request_requires_auth,
+    authorization_token_valid,
+    build_auth_login_response,
     build_backtest_result_detail_response,
     build_backtest_response,
     build_backtest_results_response,
@@ -39,7 +44,21 @@ def server_candle(ts, open_, high, low, close, volume=1000):
 
 
 class ServerTest(unittest.TestCase):
+    def setUp(self):
+        self._auth_env = {
+            key: os.environ.get(key)
+            for key in ("TRADE_ADMIN_USERNAME", "TRADE_ADMIN_PASSWORD", "TRADE_API_TOKEN")
+        }
+        os.environ["TRADE_ADMIN_USERNAME"] = "admin"
+        os.environ["TRADE_ADMIN_PASSWORD"] = "secret"
+        os.environ["TRADE_API_TOKEN"] = "unit-token"
+
     def tearDown(self):
+        for key, value in self._auth_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         BACKTEST_RESULTS.clear()
         BACKTEST_STORE.clear()
         PAPER_ORDER_LOG.clear()
@@ -64,6 +83,33 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["allocation"]["totalAccountQuote"], 10_000)
         self.assertEqual(body["allocationRows"][0]["tBudget"], 750)
+
+    def test_auth_login_returns_env_token_for_valid_admin(self):
+        status, body = build_auth_login_response(
+            json.dumps({"username": "admin", "password": "secret"}).encode("utf-8")
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["token"], "unit-token")
+        self.assertEqual(body["username"], "admin")
+
+    def test_auth_login_rejects_invalid_admin_password(self):
+        status, body = build_auth_login_response(
+            json.dumps({"username": "admin", "password": "wrong"}).encode("utf-8")
+        )
+
+        self.assertEqual(status, 401)
+        self.assertIn("error", body)
+
+    def test_sensitive_api_paths_require_bearer_token(self):
+        self.assertTrue(api_request_requires_auth("POST", "/api/paper/orders"))
+        self.assertTrue(api_request_requires_auth("POST", "/api/backtest/run"))
+        self.assertTrue(api_request_requires_auth("GET", "/api/state/static"))
+        self.assertTrue(api_request_requires_auth("GET", "/api/backtest/results"))
+        self.assertFalse(api_request_requires_auth("POST", "/api/auth/login"))
+        self.assertFalse(api_request_requires_auth("GET", "/api/health"))
+        self.assertTrue(authorization_token_valid("Bearer unit-token"))
+        self.assertFalse(authorization_token_valid(""))
 
     def test_build_data_sources_response(self):
         status, body = build_data_sources_response()
@@ -90,7 +136,7 @@ class ServerTest(unittest.TestCase):
         self.assertIn("error", body)
 
     def test_klines_response_accepts_csv_paths(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(dir=_server.ROOT / "data") as tmpdir:
             daily_path = Path(tmpdir) / "daily.csv"
             intraday_path = Path(tmpdir) / "intraday.csv"
             write_candles_csv(daily_path, [server_candle(i, 100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(30)])
@@ -114,6 +160,18 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["source"], "CSV")
         self.assertEqual(len(body["candles"]), 3)
+
+    def test_klines_response_rejects_csv_paths_outside_data_dir(self):
+        status, body = build_klines_response(
+            "NVDA",
+            "1m",
+            source="CSV",
+            daily_path="/etc/passwd",
+            intraday_path="/etc/passwd",
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("data directory", body["error"])
 
     def test_build_paper_orders_response(self):
         status, body = build_paper_orders_response()
@@ -203,6 +261,35 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(body["order"]["status"], "rejected")
         self.assertIn("stale", body["order"]["reason"])
         self.assertEqual(PAPER_ACCOUNT.positions, {})
+
+    def test_build_paper_order_response_rejects_non_positive_sell_amount(self):
+        build_paper_order_response(
+            json.dumps(
+                {
+                    "symbol": "NVDA",
+                    "side": "buy",
+                    "quoteAmount": 1000,
+                    "price": 100,
+                    "orderType": "market",
+                }
+            ).encode("utf-8")
+        )
+
+        status, body = build_paper_order_response(
+            json.dumps(
+                {
+                    "symbol": "NVDA",
+                    "side": "sell",
+                    "quoteAmount": -1,
+                    "price": 120,
+                    "orderType": "market",
+                }
+            ).encode("utf-8")
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("quoteAmount", body["error"])
+        self.assertGreater(PAPER_ACCOUNT.positions["NVDA"], 0)
 
     def test_partial_paper_sell_reduces_layer_tracking_and_allows_next_layer(self):
         first_buy = {
@@ -412,7 +499,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(body["backtest"]["assets"][0]["symbol"], "NVDA")
 
     def test_backtest_response_accepts_csv_paths(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(dir=_server.ROOT / "data") as tmpdir:
             daily_path = Path(tmpdir) / "daily.csv"
             intraday_path = Path(tmpdir) / "intraday.csv"
             write_candles_csv(daily_path, [server_candle(i, 100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(30)])
@@ -445,6 +532,35 @@ class ServerTest(unittest.TestCase):
 
         self.assertEqual(status, 404)
         self.assertIn("error", body)
+
+    def test_backtest_store_append_is_thread_safe(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = _server.BacktestResultStore(Path(tmpdir) / "backtests.json")
+            errors = []
+
+            def append_result(index):
+                try:
+                    store.append({"resultId": f"bt-{index:04d}"})
+                except Exception as exc:  # pragma: no cover - assertion reports details
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=append_result, args=(idx,)) for idx in range(20)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            results = store.list_recent(limit=25)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 20)
+        self.assertEqual({row["resultId"] for row in results}, {f"bt-{idx:04d}" for idx in range(20)})
+
+    def test_walk_forward_rejects_non_positive_window_parameters(self):
+        status, body = _server.validate_walk_forward_window(40, 20, 0)
+
+        self.assertEqual(status, 400)
+        self.assertIn("positive", body["error"])
 
 
 if __name__ == "__main__":

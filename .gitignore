@@ -2,3 +2,4 @@ QuantDinger-main
 data/
 .DS_Store
 .superpowers/
+.env

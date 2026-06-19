@@ -1,4 +1,6 @@
 import json
+import os
+import secrets
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,13 +15,14 @@ from tradebot.data_sources import DataSourceFactory
 from tradebot.execution import OrderIntent, PaperAccount, PaperExecutionAdapter, RiskLimits
 from tradebot.metrics import calculate_metrics
 from tradebot.research import AssetProfile
-from tradebot.serialization import serialize_asset_result_detail, serialize_backtest_result
+from tradebot.serialization import serialize_asset_result_detail, serialize_backtest_result, serialize_equity_curve
 from tradebot.storage import BacktestResultStore
 from tradebot.strategy import StrategyConfig
 
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = ROOT / "web"
+ENV_PATH = ROOT / ".env"
 ALLOCATION_CONFIG = default_allocation_config()
 PAPER_ACCOUNT = PaperAccount(cash=10_000.0)
 PAPER_ORDER_LOG = []
@@ -39,6 +42,71 @@ PAPER_LAST_BUY_PRICE: dict[str, float] = {}
 PAPER_T_LAYERS: dict[str, int] = {}
 PAPER_POSITION_COST: dict[str, float] = {}  # total cost basis per symbol
 PAPER_DAILY_LOSS: float = 0.0               # accumulated realized loss today (UTC day)
+
+
+def load_env_file(path: Path = ENV_PATH) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip('"').strip("'")
+
+
+def auth_settings() -> dict:
+    return {
+        "username": os.environ.get("TRADE_ADMIN_USERNAME", "admin"),
+        "password": os.environ.get("TRADE_ADMIN_PASSWORD", ""),
+        "token": os.environ.get("TRADE_API_TOKEN", ""),
+    }
+
+
+def auth_is_configured() -> bool:
+    settings = auth_settings()
+    return bool(settings["password"] and settings["token"])
+
+
+def build_auth_login_response(raw_body: bytes):
+    if not auth_is_configured():
+        return 503, {"error": "admin auth is not configured"}
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+        username = str(payload.get("username", ""))
+        password = str(payload.get("password", ""))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return 400, {"error": str(exc)}
+
+    settings = auth_settings()
+    if (
+        secrets.compare_digest(username, settings["username"])
+        and secrets.compare_digest(password, settings["password"])
+    ):
+        return 200, {"token": settings["token"], "username": settings["username"]}
+    return 401, {"error": "invalid username or password"}
+
+
+def authorization_token_valid(header_value: str) -> bool:
+    if not auth_is_configured():
+        return False
+    prefix = "Bearer "
+    if not str(header_value or "").startswith(prefix):
+        return False
+    token = str(header_value)[len(prefix):].strip()
+    return secrets.compare_digest(token, auth_settings()["token"])
+
+
+def api_request_requires_auth(method: str, path: str) -> bool:
+    parsed_path = urlparse(path).path
+    if parsed_path in {"/api/auth/login", "/api/health"}:
+        return False
+    if not parsed_path.startswith("/api/"):
+        return False
+    return True
 
 
 def build_static_state():
@@ -62,10 +130,12 @@ def build_klines_response(
     source: str = "Synthetic",
     daily_path: Optional[str] = None,
     intraday_path: Optional[str] = None,
+    start_time_s: Optional[int] = None,
+    end_time_s: Optional[int] = None,
 ):
     try:
         normalized_source = DataSourceFactory.normalize_source(source)
-        _, intraday = DataSourceFactory.get_source(normalized_source).get_default_candles(
+        daily_bars, intraday_bars = DataSourceFactory.get_source(normalized_source).get_default_candles(
             symbol=symbol,
             daily_path=daily_path,
             intraday_path=intraday_path,
@@ -75,11 +145,22 @@ def build_klines_response(
     except Exception as exc:
         return 502, {"error": str(exc), "source": source}
 
+    # 1D resolution → return daily bars (up to 60, ~3 months)
+    use_daily = resolution.lower() in ("1d", "1day", "daily")
+    bars = daily_bars[-60:] if use_daily else intraday_bars
+
+    if start_time_s is not None or end_time_s is not None:
+        start_ms = (start_time_s * 1000) if start_time_s is not None else 0
+        end_ms = (end_time_s * 1000) if end_time_s is not None else float("inf")
+        bars = [c for c in bars if start_ms <= c.open_time <= end_ms]
+    elif not use_daily:
+        bars = bars[-180:]
+
     candles = []
     vwap = []
     cumulative_quote = 0.0
     cumulative_volume = 0.0
-    for candle in intraday[-180:]:
+    for candle in bars:
         time_s = int(candle.open_time / 1000)
         candles.append([time_s, candle.open, candle.high, candle.low, candle.close])
         cumulative_quote += candle.quote_volume
@@ -133,6 +214,8 @@ def build_paper_order_response(raw_body: bytes):
         return 400, {"error": "side must be buy or sell"}
     if order_type != "market":
         return 400, {"error": "only market paper orders are enabled"}
+    if quote_amount <= 0:
+        return 400, {"error": "quoteAmount must be positive"}
 
     # --- Server-side risk checks (not delegated to caller) ---
     cfg = StrategyConfig()
@@ -280,7 +363,6 @@ def build_backtest_result_detail_response(result_id: str):
 
 
 def build_walk_forward_response(raw_body: bytes):
-    import calendar
     try:
         payload = json.loads(raw_body.decode("utf-8"))
         symbol = str(payload.get("symbol", "SPCXBUSDT")).upper()
@@ -294,6 +376,10 @@ def build_walk_forward_response(raw_body: bytes):
         per_symbol_quote = float(payload.get("perSymbolQuote", 600.0))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         return 400, {"error": str(exc)}
+
+    status, validation = validate_walk_forward_window(in_sample_bars, oos_bars, step_bars)
+    if status != 200:
+        return status, validation
 
     from datetime import datetime, timezone as tz
     try:
@@ -354,6 +440,14 @@ def build_walk_forward_response(raw_body: bytes):
             },
         }
     }
+
+
+def validate_walk_forward_window(in_sample_bars: int, oos_bars: int, step_bars: int):
+    if in_sample_bars <= 0 or oos_bars <= 0 or step_bars <= 0:
+        return 400, {"error": "walk-forward window parameters must be positive integers"}
+    if in_sample_bars > 2_000 or oos_bars > 2_000 or step_bars > 2_000:
+        return 400, {"error": "walk-forward window parameters exceed the 2000 bar limit"}
+    return 200, {}
 
 
 def append_backtest_result(result: dict) -> dict:
@@ -501,6 +595,16 @@ def build_backtest_response(raw_body: bytes):
             "assetDetails": [],
         }
     append_backtest_result(persisted)
+    primary_equity_curve = (
+        serialize_equity_curve(primary_result.equity_curve, primary_result.equity_curve_ts)
+        if primary_result is not None else []
+    )
+    primary_trades = (
+        [{"side": t.side, "openTime": t.open_time, "price": t.price,
+          "qty": t.qty, "quote": t.quote, "fee": t.fee, "reason": t.reason}
+         for t in primary_result.trades]
+        if primary_result is not None else []
+    )
     return 200, {
         "backtest": {
             "resultId": persisted["resultId"],
@@ -509,6 +613,9 @@ def build_backtest_response(raw_body: bytes):
             "executionAssumptions": persisted["executionAssumptions"],
             "summary": summary,
             "assets": assets,
+            "primaryEquityCurve": primary_equity_curve,
+            "primaryTrades": primary_trades,
+            "assetDetails": asset_details,
         }
     }
 
@@ -557,142 +664,112 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
 
+    def _write_json(self, status: int, body: dict) -> None:
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _authorized_or_respond(self) -> bool:
+        if not api_request_requires_auth(self.command, self.path):
+            return True
+        if authorization_token_valid(self.headers.get("Authorization", "")):
+            return True
+        status = 401 if auth_is_configured() else 503
+        message = "unauthorized" if auth_is_configured() else "admin auth is not configured"
+        self._write_json(status, {"error": message})
+        return False
+
     def do_GET(self):
+        if not self._authorized_or_respond():
+            return
         parsed = urlparse(self.path)
+        if parsed.path == "/api/health":
+            self._write_json(200, {"ok": True})
+            return
         if parsed.path == "/api/state":
-            payload = json.dumps(build_dashboard_state(allocation_config=ALLOCATION_CONFIG), ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._write_json(200, build_dashboard_state(allocation_config=ALLOCATION_CONFIG))
             return
         if parsed.path == "/api/state/static":
-            payload = json.dumps(build_static_state(), ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._write_json(200, build_static_state())
             return
         if parsed.path == "/api/state/live":
-            payload = json.dumps(build_live_state(), ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._write_json(200, build_live_state())
             return
         if parsed.path == "/api/klines":
             params = parse_qs(parsed.query)
+            raw_start = params.get("startTime", [None])[0]
+            raw_end = params.get("endTime", [None])[0]
             status, body = build_klines_response(
                 params.get("symbol", ["NVDA"])[0],
                 params.get("resolution", ["1m"])[0],
                 params.get("source", ["Synthetic"])[0],
                 params.get("dailyPath", [None])[0],
                 params.get("intradayPath", [None])[0],
+                start_time_s=int(raw_start) if raw_start else None,
+                end_time_s=int(raw_end) if raw_end else None,
             )
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._write_json(status, body)
             return
         if parsed.path == "/api/data-sources":
             status, body = build_data_sources_response()
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._write_json(status, body)
             return
         if parsed.path == "/api/paper/orders":
             status, body = build_paper_orders_response()
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._write_json(status, body)
             return
         if parsed.path == "/api/backtest/results":
             status, body = build_backtest_results_response()
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._write_json(status, body)
             return
         if parsed.path.startswith("/api/backtest/results/"):
             result_id = parsed.path.rsplit("/", 1)[-1]
             status, body = build_backtest_result_detail_response(result_id)
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._write_json(status, body)
             return
         return super().do_GET()
 
     def do_POST(self):
+        if not self._authorized_or_respond():
+            return
+        if self.path == "/api/auth/login":
+            length = int(self.headers.get("Content-Length", "0"))
+            status, body = build_auth_login_response(self.rfile.read(length))
+            self._write_json(status, body)
+            return
         if self.path == "/api/allocation":
             length = int(self.headers.get("Content-Length", "0"))
             status, body = build_config_response(self.rfile.read(length))
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._write_json(status, body)
             return
         if self.path == "/api/backtest/run":
             length = int(self.headers.get("Content-Length", "0"))
             status, body = build_backtest_response(self.rfile.read(length))
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._write_json(status, body)
             return
         if self.path == "/api/paper/orders":
             length = int(self.headers.get("Content-Length", "0"))
             status, body = build_paper_order_response(self.rfile.read(length))
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._write_json(status, body)
             return
         if self.path == "/api/paper/reset":
             length = int(self.headers.get("Content-Length", "0"))
             status, body = build_paper_reset_response(self.rfile.read(length))
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._write_json(status, body)
             return
         if self.path == "/api/backtest/walkforward":
             length = int(self.headers.get("Content-Length", "0"))
             status, body = build_walk_forward_response(self.rfile.read(length))
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._write_json(status, body)
             return
         self.send_error(404)
 
 
 def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
+    load_env_file()
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     print(f"Trade dashboard running at http://{host}:{port}")
     server.serve_forever()

@@ -2,6 +2,20 @@ from pathlib import Path
 
 from tradebot.data import fetch_klines_range, fetch_spot_klines, generate_synthetic_spcx, read_candles_csv
 
+DATA_ROOT = Path(__file__).resolve().parents[1] / "data"
+
+
+def resolve_data_file(path_value, data_root: Path = DATA_ROOT) -> Path:
+    raw = Path(str(path_value or ""))
+    root = data_root.resolve()
+    candidate = raw if raw.is_absolute() else root / raw
+    resolved = candidate.resolve()
+    if root != resolved and root not in resolved.parents:
+        raise ValueError("CSV paths must stay inside the Trade data directory")
+    if not resolved.is_file():
+        raise ValueError(f"CSV file not found in data directory: {raw}")
+    return resolved
+
 
 class SyntheticDataSource:
     name = "Synthetic"
@@ -17,7 +31,7 @@ class CSVDataSource:
     def get_default_candles(self, daily_path=None, intraday_path=None, **kwargs):
         if not daily_path or not intraday_path:
             raise ValueError("CSV source requires daily_path and intraday_path")
-        return read_candles_csv(Path(daily_path)), read_candles_csv(Path(intraday_path))
+        return read_candles_csv(resolve_data_file(daily_path)), read_candles_csv(resolve_data_file(intraday_path))
 
 
 class BinanceDataSource:
