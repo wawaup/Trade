@@ -25,6 +25,7 @@ class StrategyConfig:
     buy_grid_spacing_pct: float = 0.012
     flash_crash_pct: float = 0.05
     max_layers: int = 3
+    session_reset_utc_hour: int = 13
 
 
 def generate_signal(
@@ -41,7 +42,7 @@ def generate_signal(
     trend = daily_trend_state(daily)
     current = intraday[-1]
     previous = intraday[-2]
-    day_vwap = session_vwap(intraday)
+    day_vwap = session_vwap(intraday, reset_utc_hour=config.session_reset_utc_hour)
     daily_atr = atr_pct(daily) or 0.0
 
     if day_vwap is None:
