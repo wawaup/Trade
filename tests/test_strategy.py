@@ -169,6 +169,29 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(signal.action, "HOLD")
         self.assertIn("extreme", signal.reason)
 
+    def test_signal_vwap_ignores_previous_session_candles(self):
+        hour = 3_600_000
+        daily = [candle(i, 100 + i, 102 + i, 99 + i, 101 + i) for i in range(25)]
+        previous_session = [
+            candle(8 * hour, 210, 212, 209, 211, 1000),
+            candle(9 * hour, 211, 213, 210, 212, 1000),
+        ]
+        current_session = [
+            candle(32 * hour, 100, 101, 99, 100, 1000),
+            candle(32 * hour + 60_000, 100, 101, 98, 98, 1000),
+            candle(32 * hour + 120_000, 98, 102.8, 97, 102.8, 1000),
+        ]
+
+        signal = generate_signal(
+            daily,
+            previous_session + current_session,
+            position_quote=0,
+            config=StrategyConfig(momentum_lookback=50),
+        )
+
+        self.assertEqual(signal.action, "BUY")
+        self.assertIn("reclaimed VWAP", signal.reason)
+
 
 if __name__ == "__main__":
     unittest.main()

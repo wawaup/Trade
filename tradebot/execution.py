@@ -134,11 +134,11 @@ class PaperExecutionAdapter:
             current_quote = self.account.positions.get(intent.symbol, 0.0) * price
             if current_quote + quote > self.risk_limits.max_t_position_quote:
                 return self._reject(intent, "T bucket cap exceeded")
-        if self.account.cash < quote + fee:
+        if self.account.cash < quote:
             return self._reject(intent, "insufficient cash")
 
         qty = max(0.0, (quote - fee) / price)
-        self.account.cash -= quote + fee
+        self.account.cash -= quote
         self.account.positions[intent.symbol] = self.account.positions.get(intent.symbol, 0.0) + qty
         return FillSnapshot(intent.symbol, intent.side, qty, price, fee, "filled")
 

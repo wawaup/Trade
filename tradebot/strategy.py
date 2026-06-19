@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from tradebot.indicators import atr_pct, daily_trend_state, vwap
+from tradebot.indicators import atr_pct, daily_trend_state, session_vwap
 from tradebot.models import Candle, Signal
 
 
@@ -24,6 +24,7 @@ class StrategyConfig:
     min_daily_atr_pct: float = 0.018
     buy_grid_spacing_pct: float = 0.012
     flash_crash_pct: float = 0.05
+    max_layers: int = 3
 
 
 def generate_signal(
@@ -40,7 +41,7 @@ def generate_signal(
     trend = daily_trend_state(daily)
     current = intraday[-1]
     previous = intraday[-2]
-    day_vwap = vwap(intraday)
+    day_vwap = session_vwap(intraday)
     daily_atr = atr_pct(daily) or 0.0
 
     if day_vwap is None:

@@ -35,6 +35,8 @@ class BacktestResult:
     execution_assumptions: dict = field(default_factory=dict)
     order_intents: list = field(default_factory=list)
     risk_events: list = field(default_factory=list)
+    core_only_return_pct: float = 0.0
+    strategy_vs_core_only_alpha: float = 0.0
 
 
 def run_backtest(
@@ -58,10 +60,11 @@ def run_backtest(
     risk_events: list[dict] = []
     layers = 0
 
-    for idx in range(2, len(intraday) + 1):
+    for idx in range(2, len(intraday)):
         window = intraday[:idx]
-        current = window[-1]
-        t_value = t_qty * current.close
+        signal_bar = window[-1]
+        fill_bar = intraday[idx]
+        t_value = t_qty * signal_bar.close
         avg_entry = t_cost / t_qty if t_qty > 0 else None
         signal = generate_signal(
             daily,
@@ -73,8 +76,8 @@ def run_backtest(
         )
 
         synthetic_quality = MarketQuality(
-            best_bid=current.close * (1 - backtest_config.synthetic_spread_bps / 20_000),
-            best_ask=current.close * (1 + backtest_config.synthetic_spread_bps / 20_000),
+            best_bid=fill_bar.open * (1 - backtest_config.synthetic_spread_bps / 20_000),
+            best_ask=fill_bar.open * (1 + backtest_config.synthetic_spread_bps / 20_000),
         )
         quality_ok, quality_reason = market_quality_allows_trade(
             synthetic_quality,
@@ -83,14 +86,15 @@ def run_backtest(
 
         buy_is_spaced = (
             last_buy_price is None
-            or current.close <= last_buy_price * (1 - strategy_config.buy_grid_spacing_pct)
+            or fill_bar.open <= last_buy_price * (1 - strategy_config.buy_grid_spacing_pct)
         )
+        max_layers_reached = layers >= strategy_config.max_layers
 
         if signal.action == "BUY":
             source_signal = "OPEN_T" if layers <= 0 else "ADD_T"
             order_intents.append(
                 _order_intent_record(
-                    current.open_time,
+                    signal_bar.open_time,
                     "buy",
                     source_signal,
                     signal.suggested_quote,
@@ -98,21 +102,31 @@ def run_backtest(
                     signal.reason,
                 )
             )
-            if not quality_ok:
-                risk_events.append(_risk_event(current.open_time, "spread_rejected", quality_reason, signal.reason))
+            if max_layers_reached:
+                risk_events.append(
+                    _risk_event(signal_bar.open_time, "max_layers_rejected", "max layers reached", signal.reason)
+                )
+            elif not quality_ok:
+                risk_events.append(_risk_event(signal_bar.open_time, "spread_rejected", quality_reason, signal.reason))
             elif cash < signal.suggested_quote:
                 risk_events.append(
-                    _risk_event(current.open_time, "cash_rejected", "insufficient cash", signal.reason)
+                    _risk_event(signal_bar.open_time, "cash_rejected", "insufficient cash", signal.reason)
                 )
             elif not buy_is_spaced:
                 risk_events.append(
-                    _risk_event(current.open_time, "grid_spacing_rejected", "buy grid spacing not reached", signal.reason)
+                    _risk_event(signal_bar.open_time, "grid_spacing_rejected", "buy grid spacing not reached", signal.reason)
                 )
 
-        if signal.action == "BUY" and quality_ok and cash >= signal.suggested_quote and buy_is_spaced:
+        if (
+            signal.action == "BUY"
+            and not max_layers_reached
+            and quality_ok
+            and cash >= signal.suggested_quote
+            and buy_is_spaced
+        ):
             quote = min(signal.suggested_quote, cash, max_t_bucket - t_value)
             if quote >= signal.suggested_quote:
-                fill_price = current.close * (1 + backtest_config.slippage_bps / 10_000)
+                fill_price = fill_bar.open * (1 + backtest_config.slippage_bps / 10_000)
                 fee = fees.estimate(quote)
                 qty = (quote - fee) / fill_price
                 cash -= quote
@@ -121,19 +135,19 @@ def run_backtest(
                 fees_paid += fee
                 last_buy_price = fill_price
                 layers += 1
-                max_t_position_quote = max(max_t_position_quote, t_qty * current.close)
+                max_t_position_quote = max(max_t_position_quote, t_qty * fill_bar.open)
                 trades.append(
-                    Trade("BUY", current.open_time, fill_price, qty, quote, fee, signal.reason)
+                    Trade("BUY", fill_bar.open_time, fill_price, qty, quote, fee, signal.reason)
                 )
             else:
                 risk_events.append(
-                    _risk_event(current.open_time, "t_bucket_cap_rejected", "T bucket cap exceeded", signal.reason)
+                    _risk_event(signal_bar.open_time, "t_bucket_cap_rejected", "T bucket cap exceeded", signal.reason)
                 )
 
         elif signal.action == "SELL":
             order_intents.append(
                 _order_intent_record(
-                    current.open_time,
+                    signal_bar.open_time,
                     "sell",
                     "CLOSE_T",
                     0.0,
@@ -143,12 +157,12 @@ def run_backtest(
                 )
             )
             if not quality_ok:
-                risk_events.append(_risk_event(current.open_time, "spread_rejected", quality_reason, signal.reason))
+                risk_events.append(_risk_event(signal_bar.open_time, "spread_rejected", quality_reason, signal.reason))
             elif t_qty <= 0:
-                risk_events.append(_risk_event(current.open_time, "position_rejected", "no T position", signal.reason))
+                risk_events.append(_risk_event(signal_bar.open_time, "position_rejected", "no T position", signal.reason))
 
         if signal.action == "SELL" and quality_ok and t_qty > 0:
-            fill_price = current.close * (1 - backtest_config.slippage_bps / 10_000)
+            fill_price = fill_bar.open * (1 - backtest_config.slippage_bps / 10_000)
             gross = t_qty * fill_price
             fee = fees.estimate(gross)
             pnl = gross - fee - t_cost
@@ -156,18 +170,25 @@ def run_backtest(
             fees_paid += fee
             trade_pnls.append(pnl)
             trades.append(
-                Trade("SELL", current.open_time, fill_price, t_qty, gross, fee, signal.reason)
+                Trade("SELL", fill_bar.open_time, fill_price, t_qty, gross, fee, signal.reason)
             )
             t_qty = 0.0
             t_cost = 0.0
             last_buy_price = None
             layers = 0
 
-        equity_curve.append(cash + t_qty * current.close)
+        equity_curve.append(cash + t_qty * fill_bar.close)
 
     last_price = intraday[-1].close if intraday else 0.0
     t_position_value = t_qty * last_price
     ending_equity = cash + t_position_value
+    core_only_return_pct = _core_only_return_pct(daily)
+    t_return_pct = (
+        (ending_equity / max_t_bucket - 1)
+        if max_t_bucket > 0
+        else 0.0
+    )
+    strategy_vs_core_only_alpha = t_return_pct - core_only_return_pct
     config_snapshot = {
         "startingQuote": backtest_config.starting_quote,
         "coreAllocationPct": backtest_config.core_allocation_pct,
@@ -177,7 +198,7 @@ def run_backtest(
         "strategy": strategy_config.__dict__,
     }
     execution_assumptions = {
-        "fillTiming": "modeled_current_close",
+        "fillTiming": "next_bar_open",
         "feeModel": "BinanceStockFeeModel",
         "paperOnly": True,
         "engineVersion": "tradebot-backtest-v2",
@@ -203,6 +224,8 @@ def run_backtest(
         execution_assumptions=execution_assumptions,
         order_intents=order_intents,
         risk_events=risk_events,
+        core_only_return_pct=core_only_return_pct,
+        strategy_vs_core_only_alpha=strategy_vs_core_only_alpha,
     )
 
 
@@ -237,3 +260,9 @@ def _risk_event(timestamp: int, event_type: str, reason: str, signal_reason: str
         "reason": reason,
         "signalReason": signal_reason,
     }
+
+
+def _core_only_return_pct(daily: list[Candle]) -> float:
+    if len(daily) < 2 or daily[0].close <= 0:
+        return 0.0
+    return daily[-1].close / daily[0].close - 1

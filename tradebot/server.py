@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 from tradebot.allocation import allocation_config_from_dict, allocation_config_to_dict, build_allocations, default_allocation_config
@@ -9,10 +10,10 @@ from tradebot.backtest import BacktestConfig, run_backtest
 from tradebot.dashboard import build_dashboard_state
 from tradebot.data import generate_synthetic_spcx
 from tradebot.data_sources import DataSourceFactory
-from tradebot.execution import OrderIntent, PaperAccount, PaperExecutionAdapter
+from tradebot.execution import OrderIntent, PaperAccount, PaperExecutionAdapter, RiskLimits
 from tradebot.metrics import calculate_metrics
 from tradebot.research import AssetProfile
-from tradebot.serialization import serialize_backtest_result
+from tradebot.serialization import serialize_asset_result_detail, serialize_backtest_result
 from tradebot.storage import BacktestResultStore
 from tradebot.strategy import StrategyConfig
 
@@ -25,6 +26,11 @@ PAPER_ORDER_LOG = []
 BACKTEST_RESULTS = []
 BACKTEST_ENGINE_VERSION = "trade-research-v1"
 BACKTEST_STORE = BacktestResultStore(ROOT / "data" / "backtest_results.json")
+PAPER_RISK_LIMITS = RiskLimits(
+    max_order_quote=5_000.0,
+    max_t_position_quote=7_500.0,
+    max_spread_pct=0.005,
+)
 
 
 def build_static_state():
@@ -42,10 +48,20 @@ def build_live_state():
     return {"live": state["live"]}
 
 
-def build_klines_response(symbol: str, resolution: str, source: str = "Synthetic"):
+def build_klines_response(
+    symbol: str,
+    resolution: str,
+    source: str = "Synthetic",
+    daily_path: Optional[str] = None,
+    intraday_path: Optional[str] = None,
+):
     try:
         normalized_source = DataSourceFactory.normalize_source(source)
-        _, intraday = DataSourceFactory.get_source(normalized_source).get_default_candles(symbol=symbol)
+        _, intraday = DataSourceFactory.get_source(normalized_source).get_default_candles(
+            symbol=symbol,
+            daily_path=daily_path,
+            intraday_path=intraday_path,
+        )
     except ValueError as exc:
         return 400, {"error": str(exc)}
     except Exception as exc:
@@ -120,7 +136,14 @@ def build_paper_order_response(raw_body: bytes):
         reduce_only=side == "sell",
         paper_only=True,
     )
-    fill = PaperExecutionAdapter(PAPER_ACCOUNT).execute(intent, price=price, fee=max(0.0, quote_amount * 0.001))
+    fill = PaperExecutionAdapter(PAPER_ACCOUNT, PAPER_RISK_LIMITS).execute(
+        intent,
+        price=price,
+        fee=max(0.0, quote_amount * 0.001),
+        spread_pct=payload.get("spreadPct"),
+        market_data_age_sec=payload.get("marketDataAgeSec"),
+        daily_loss_quote=payload.get("dailyLossQuote"),
+    )
     order = {
         "orderId": f"po-{len(PAPER_ORDER_LOG) + 1:04d}",
         "createdAt": datetime.now(timezone.utc).isoformat(),
@@ -187,6 +210,8 @@ def build_backtest_response(raw_body: bytes):
         slippage = float(payload.get("slippageBps", 30))
         spread = float(payload.get("spreadBps", 20))
         source = DataSourceFactory.normalize_source(payload.get("source", "Synthetic"))
+        daily_path = payload.get("dailyPath")
+        intraday_path = payload.get("intradayPath")
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         return 400, {"error": str(exc)}
 
@@ -205,7 +230,11 @@ def build_backtest_response(raw_body: bytes):
     per_asset_quote = 15_000 / len(selected) if selected else 0.0
     for profile in selected:
         try:
-            daily, intraday = data_source.get_default_candles(symbol=profile.symbol)
+            daily, intraday = data_source.get_default_candles(
+                symbol=profile.symbol,
+                daily_path=daily_path,
+                intraday_path=intraday_path,
+            )
         except Exception as exc:
             return 502, {"error": str(exc), "source": source, "symbol": profile.symbol}
         result = run_backtest(
@@ -226,11 +255,15 @@ def build_backtest_response(raw_body: bytes):
     aggregate_curve = [aggregate_start]
     aggregate_pnls = []
     max_global_t_exposure = 0.0
+    aggregate_core_returns = []
+    aggregate_alpha = []
     for row in asset_results:
         result = row["result"]
         aggregate_curve.append(aggregate_curve[-1] + (result.ending_equity - result.starting_quote * 0.30))
         aggregate_pnls.extend(result.trade_pnls)
         max_global_t_exposure += result.max_t_position_quote
+        aggregate_core_returns.append(result.core_only_return_pct)
+        aggregate_alpha.append(result.strategy_vs_core_only_alpha)
     aggregate_metrics = calculate_metrics(aggregate_start, aggregate_curve, aggregate_pnls)
     summary = {
         "totalReturnPct": aggregate_metrics.total_return_pct,
@@ -238,6 +271,8 @@ def build_backtest_response(raw_body: bytes):
         "winRate": aggregate_metrics.win_rate,
         "profitFactor": aggregate_metrics.profit_factor,
         "globalTExposureCap": min(max_global_t_exposure, 15_000 * 0.30),
+        "coreOnlyReturnPct": sum(aggregate_core_returns) / len(aggregate_core_returns) if aggregate_core_returns else 0.0,
+        "strategyVsCoreOnlyAlpha": sum(aggregate_alpha) / len(aggregate_alpha) if aggregate_alpha else 0.0,
     }
     assets = [
         {
@@ -250,6 +285,20 @@ def build_backtest_response(raw_body: bytes):
             "trades": len(row["result"].trades),
             "feesPaid": row["result"].fees_paid,
         }
+        for row in asset_results
+    ]
+    asset_details = [
+        serialize_asset_result_detail(
+            row["profile"].symbol,
+            row["profile"].theme,
+            row["result"],
+            metrics={
+                "returnPct": row["metrics"].total_return_pct,
+                "maxDrawdownPct": row["metrics"].max_drawdown_pct,
+                "winRate": row["metrics"].win_rate,
+                "profitFactor": row["metrics"].profit_factor,
+            },
+        )
         for row in asset_results
     ]
     created_at = datetime.now(timezone.utc).isoformat()
@@ -265,6 +314,7 @@ def build_backtest_response(raw_body: bytes):
             assets=assets,
             source=source,
         )
+        persisted["assetDetails"] = asset_details
     else:
         persisted = {
             "resultId": result_id,
@@ -281,6 +331,7 @@ def build_backtest_response(raw_body: bytes):
             "tradePnls": [],
             "orderIntents": [],
             "riskEvents": [],
+            "assetDetails": [],
         }
     append_backtest_result(persisted)
     return 200, {
@@ -371,6 +422,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 params.get("symbol", ["NVDA"])[0],
                 params.get("resolution", ["1m"])[0],
                 params.get("source", ["Synthetic"])[0],
+                params.get("dailyPath", [None])[0],
+                params.get("intradayPath", [None])[0],
             )
             payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
             self.send_response(status)

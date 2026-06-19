@@ -1,6 +1,9 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
+from tradebot.data import write_candles_csv
 from tradebot.data_sources import DataSourceFactory
 from tradebot.models import Candle
 from tradebot.server import (
@@ -81,6 +84,32 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("error", body)
 
+    def test_klines_response_accepts_csv_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            daily_path = Path(tmpdir) / "daily.csv"
+            intraday_path = Path(tmpdir) / "intraday.csv"
+            write_candles_csv(daily_path, [server_candle(i, 100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(30)])
+            write_candles_csv(
+                intraday_path,
+                [
+                    server_candle(100, 130, 131, 128, 129, 1000),
+                    server_candle(101, 129, 130, 127, 128, 1000),
+                    server_candle(102, 128, 132, 127.5, 131.5, 2000),
+                ],
+            )
+
+            status, body = build_klines_response(
+                "NVDA",
+                "1m",
+                source="CSV",
+                daily_path=str(daily_path),
+                intraday_path=str(intraday_path),
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["source"], "CSV")
+        self.assertEqual(len(body["candles"]), 3)
+
     def test_build_paper_orders_response(self):
         status, body = build_paper_orders_response()
         self.assertEqual(status, 200)
@@ -119,6 +148,22 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["order"]["status"], "filled")
         self.assertGreater(body["order"]["price"], 0)
+
+    def test_build_paper_order_response_applies_risk_limits(self):
+        payload = {
+            "symbol": "NVDA",
+            "side": "buy",
+            "quoteAmount": 25_000,
+            "price": 100,
+            "orderType": "market",
+        }
+
+        status, body = build_paper_order_response(json.dumps(payload).encode("utf-8"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["order"]["status"], "rejected")
+        self.assertIn("max order quote", body["order"]["reason"])
+        self.assertEqual(PAPER_ACCOUNT.positions, {})
 
     def test_build_paper_reset_response_clears_account_and_orders(self):
         build_paper_order_response(
@@ -166,6 +211,9 @@ class ServerTest(unittest.TestCase):
         self.assertIn("trades", result)
         self.assertIn("orderIntents", result)
         self.assertIn("riskEvents", result)
+        self.assertIn("assetDetails", result)
+        self.assertIn("coreOnlyReturnPct", result["summary"])
+        self.assertIn("strategyVsCoreOnlyAlpha", result["summary"])
         self.assertEqual(result["summary"], body["backtest"]["summary"])
 
     def test_backtest_result_detail_response_returns_full_persisted_result(self):
@@ -185,6 +233,25 @@ class ServerTest(unittest.TestCase):
         self.assertIn("executionAssumptions", detail["result"])
         self.assertGreater(len(detail["result"]["equityCurve"]), 0)
         self.assertIsInstance(detail["result"]["trades"], list)
+
+    def test_backtest_detail_persists_every_asset_audit_trail(self):
+        status, body = build_backtest_response(
+            json.dumps({"symbols": ["NVDA", "TSLA"], "source": "Synthetic"}).encode("utf-8")
+        )
+        result_id = body["backtest"]["resultId"]
+
+        detail_status, detail = build_backtest_result_detail_response(result_id)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(detail_status, 200)
+        details = detail["result"]["assetDetails"]
+        self.assertEqual({row["symbol"] for row in details}, {"NVDA", "TSLA"})
+        for row in details:
+            self.assertIn("equityCurve", row)
+            self.assertIn("trades", row)
+            self.assertIn("orderIntents", row)
+            self.assertIn("riskEvents", row)
+            self.assertIn("executionAssumptions", row)
 
     def test_backtest_response_rejects_unknown_data_source(self):
         status, body = build_backtest_response(
@@ -224,6 +291,35 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(body["backtest"]["source"], "Unit")
         self.assertEqual(UnitDataSource.calls, ["NVDA"])
         self.assertEqual(body["backtest"]["assets"][0]["symbol"], "NVDA")
+
+    def test_backtest_response_accepts_csv_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            daily_path = Path(tmpdir) / "daily.csv"
+            intraday_path = Path(tmpdir) / "intraday.csv"
+            write_candles_csv(daily_path, [server_candle(i, 100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(30)])
+            write_candles_csv(
+                intraday_path,
+                [
+                    server_candle(100, 130, 131, 128, 129, 1000),
+                    server_candle(101, 129, 130, 127, 128, 1000),
+                    server_candle(102, 128, 132, 127.5, 131.5, 2000),
+                    server_candle(103, 131.5, 132, 131, 131.8, 2000),
+                ],
+            )
+
+            status, body = build_backtest_response(
+                json.dumps(
+                    {
+                        "symbols": ["NVDA"],
+                        "source": "CSV",
+                        "dailyPath": str(daily_path),
+                        "intradayPath": str(intraday_path),
+                    }
+                ).encode("utf-8")
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["backtest"]["source"], "CSV")
 
     def test_backtest_result_detail_response_returns_404_for_missing_result(self):
         status, body = build_backtest_result_detail_response("missing")

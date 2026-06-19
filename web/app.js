@@ -252,10 +252,28 @@ function renderChart(chartRef, data) {
   chartRef.chart.timeScale().fitContent();
 }
 
+function collectDataSourceControls() {
+  const source = document.getElementById("dataSourceSelect")?.value || "Synthetic";
+  const dailyPath = document.getElementById("csvDailyPath")?.value.trim() || "";
+  const intradayPath = document.getElementById("csvIntradayPath")?.value.trim() || "";
+  const payload = { source };
+  if (dailyPath) payload.dailyPath = dailyPath;
+  if (intradayPath) payload.intradayPath = intradayPath;
+  return payload;
+}
+
 async function loadKlines(symbol = activeSymbol, resolution = activeResolution) {
   activeSymbol = symbol;
   activeResolution = resolution;
-  const response = await fetch(`/api/klines?symbol=${encodeURIComponent(symbol)}&resolution=${encodeURIComponent(resolution)}`);
+  const dataSource = collectDataSourceControls();
+  const params = new URLSearchParams({
+    symbol,
+    resolution,
+    source: dataSource.source,
+  });
+  if (dataSource.dailyPath) params.set("dailyPath", dataSource.dailyPath);
+  if (dataSource.intradayPath) params.set("intradayPath", dataSource.intradayPath);
+  const response = await fetch(`/api/klines?${params.toString()}`);
   const data = await response.json();
   renderChart(backtestChart, data);
   renderChart(liveChart, data);
@@ -376,6 +394,7 @@ async function saveAllocation(event) {
 
 function collectBacktestControls() {
   return {
+    ...collectDataSourceControls(),
     symbols: Array.from(document.querySelectorAll("[name='backtestSymbol']:checked")).map((input) => input.value),
     sampleSplit: document.querySelector("#sampleSplit .active")?.dataset.sample || "in",
     slippageBps: Number(document.getElementById("slippageBps").value),
@@ -419,7 +438,7 @@ function switchOrderType(orderType) {
 }
 
 function bindControlPanel() {
-  document.querySelectorAll("[name='backtestSymbol'], #slippageBps, #spreadBps").forEach((control) => {
+  document.querySelectorAll("[name='backtestSymbol'], #dataSourceSelect, #csvDailyPath, #csvIntradayPath, #slippageBps, #spreadBps").forEach((control) => {
     control.addEventListener("change", runBacktestFromControls);
   });
   document.querySelectorAll("#sampleSplit button").forEach((button) => {

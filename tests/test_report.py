@@ -31,6 +31,8 @@ class ReportTest(unittest.TestCase):
         self.assertIn("夏普比率", html)
         self.assertIn("Terminal 风格执行 Log", html)
         self.assertIn("样本外测试", html)
+        self.assertIn("压力情景示例", html)
+        self.assertNotIn(">压力测试<", html)
 
 
 if __name__ == "__main__":

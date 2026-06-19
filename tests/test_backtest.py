@@ -70,6 +70,8 @@ class BacktestTest(unittest.TestCase):
         self.assertIn("slippageBps", result.config_snapshot)
         self.assertIsInstance(result.order_intents, list)
         self.assertIsInstance(result.risk_events, list)
+        self.assertIsInstance(result.core_only_return_pct, float)
+        self.assertIsInstance(result.strategy_vs_core_only_alpha, float)
 
     def test_backtest_records_order_intent_for_buy_signal(self):
         daily = [candle(i, 100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(30)]
@@ -77,6 +79,7 @@ class BacktestTest(unittest.TestCase):
             candle(100, 130, 131, 128, 129, 1000),
             candle(101, 129, 130, 127, 128, 1000),
             candle(102, 128, 132, 127.5, 131.5, 2000),
+            candle(103, 131.5, 132, 131, 131.8, 2000),
         ]
 
         result = run_backtest(
@@ -100,6 +103,7 @@ class BacktestTest(unittest.TestCase):
             candle(100, 130, 131, 128, 129, 1000),
             candle(101, 129, 130, 127, 128, 1000),
             candle(102, 128, 132, 127.5, 131.5, 2000),
+            candle(103, 131.5, 132, 131, 131.8, 2000),
         ]
 
         result = run_backtest(
@@ -117,6 +121,46 @@ class BacktestTest(unittest.TestCase):
         self.assertGreaterEqual(len(result.risk_events), 1)
         self.assertEqual(result.risk_events[0]["type"], "spread_rejected")
         self.assertIn("spread", result.risk_events[0]["reason"])
+
+    def test_backtest_fills_buy_signal_on_next_bar_open(self):
+        daily = [candle(i, 100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(30)]
+        intraday = [
+            candle(100, 130, 131, 128, 129, 1000),
+            candle(101, 129, 130, 127, 128, 1000),
+            candle(102, 128, 132, 127.5, 131.5, 2000),
+            candle(103, 140, 141, 139, 140.5, 2000),
+        ]
+
+        result = run_backtest(
+            daily,
+            intraday,
+            BacktestConfig(starting_quote=3500, core_allocation_pct=0.70, slippage_bps=50),
+            StrategyConfig(take_profit_pct=0.05),
+        )
+
+        buys = [trade for trade in result.trades if trade.side == "BUY"]
+        self.assertGreaterEqual(len(buys), 1)
+        self.assertEqual(result.execution_assumptions["fillTiming"], "next_bar_open")
+        self.assertAlmostEqual(buys[0].price, 140 * 1.005)
+
+    def test_backtest_rejects_buy_when_max_layers_reached(self):
+        daily = [candle(i, 100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(30)]
+        intraday = [
+            candle(100, 130, 131, 128, 129, 1000),
+            candle(101, 129, 130, 127, 128, 1000),
+            candle(102, 128, 132, 127.5, 131.5, 2000),
+            candle(103, 131.5, 132, 131, 131.8, 2000),
+        ]
+
+        result = run_backtest(
+            daily,
+            intraday,
+            BacktestConfig(starting_quote=3500, core_allocation_pct=0.70),
+            StrategyConfig(max_layers=0, take_profit_pct=0.05),
+        )
+
+        self.assertEqual([trade for trade in result.trades if trade.side == "BUY"], [])
+        self.assertTrue(any(event["type"] == "max_layers_rejected" for event in result.risk_events))
 
 
 if __name__ == "__main__":

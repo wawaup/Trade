@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 from typing import Optional
 
+from tradebot.data import session_start_ms
 from tradebot.models import Candle
 
 
@@ -16,6 +17,14 @@ def vwap(candles: Sequence[Candle]) -> Optional[float]:
     if volume <= 0:
         return None
     return quote / volume
+
+
+def session_vwap(candles: Sequence[Candle], reset_utc_hour: int = 8) -> Optional[float]:
+    if not candles:
+        return None
+    latest_time = candles[-1].open_time
+    session_start = session_start_ms(latest_time, reset_utc_hour=reset_utc_hour)
+    return vwap([c for c in candles if session_start <= c.open_time <= latest_time])
 
 
 def atr_pct(candles: Sequence[Candle], period: int = 14) -> Optional[float]:

@@ -17,7 +17,7 @@
 | Source | 别名 | 数据来源 | 网络 | 当前用途 |
 |---|---|---|---|---|
 | `Synthetic` | `synthetic`, `mock`, `demo` | `generate_synthetic_spcx()` 合成 K 线 | 否 | 默认图表、默认回测、测试 |
-| `CSV` | `csv`, `file` | 本地 CSV 文件 | 否 | 代码路径可用；HTTP 回测尚未暴露路径参数 |
+| `CSV` | `csv`, `file` | 本地 CSV 文件 | 否 | 可通过 HTTP `dailyPath` / `intradayPath` 传入本地文件路径 |
 | `Binance` | `binance`, `spot` | Binance public spot klines | 是 | 需要网络；沙盒或网络不可用时可能失败 |
 
 ### Candle 接口
@@ -60,7 +60,7 @@
 }
 ```
 
-### `GET /api/klines?symbol=&resolution=&source=`
+### `GET /api/klines?symbol=&resolution=&source=&dailyPath=&intradayPath=`
 
 用途：给前端图表返回 Lightweight Charts 友好的 K 线数组和 VWAP 数组。
 
@@ -71,6 +71,7 @@
 - 数据源读取失败时返回 `502`。
 - 当前只使用数据源返回的 `intraday`，取最后 180 根。
 - `resolution` 当前只回传给响应；没有改变数据源 interval。Binance 数据源内部仍固定请求 `1m` intraday。
+- `source=CSV` 时需要 `dailyPath` 和 `intradayPath`。
 
 响应字段：
 
@@ -99,6 +100,8 @@ vwap = cumulative_quote / cumulative_volume
 |---|---:|---|
 | `symbols` | `[]` | 空数组表示使用内置全部标的；非空时只跑这些 symbol |
 | `source` | `Synthetic` | 数据源；未知 source 返回 `400` |
+| `dailyPath` | 无 | `source=CSV` 时的 daily CSV 路径 |
+| `intradayPath` | 无 | `source=CSV` 时的 intraday CSV 路径 |
 | `slippageBps` | 30 | 回测买卖滑点 bps |
 | `spreadBps` | 20 | 回测合成点差 bps |
 
@@ -125,7 +128,7 @@ BacktestConfig.core_allocation_pct = 0.70
 每个 symbol 都会通过：
 
 ```text
-DataSourceFactory.get_source(source).get_default_candles(symbol=symbol)
+DataSourceFactory.get_source(source).get_default_candles(symbol=symbol, daily_path=dailyPath, intraday_path=intradayPath)
 ```
 
 读取 `daily` 和 `intraday`，然后调用：
@@ -257,14 +260,13 @@ fee = max(0, quoteAmount * 0.001)
 当前 `executionAssumptions.fillTiming` 是：
 
 ```text
-modeled_current_close
+next_bar_open
 ```
 
-含义：信号用当前日内窗口算出后，成交按当前 K 线收盘价建模，再叠加滑点。
+含义：信号用 bar N 收盘后可见的数据生成，成交按 bar N+1 开盘价建模，再叠加滑点。
 
 当前不是：
 
-- 下一根开盘成交
 - 真实 order book 成交
 - limit maker 成交
 - 分笔撮合
@@ -272,26 +274,26 @@ modeled_current_close
 ### 买入价格
 
 ```text
-fill_price = current.close * (1 + slippage_bps / 10000)
+fill_price = next_bar.open * (1 + slippage_bps / 10000)
 ```
 
-默认 `slippage_bps=30`，即买入价比当前收盘价高 0.3%。
+默认 `slippage_bps=30`，即买入价比下一根 K 线开盘价高 0.3%。
 
 ### 卖出价格
 
 ```text
-fill_price = current.close * (1 - slippage_bps / 10000)
+fill_price = next_bar.open * (1 - slippage_bps / 10000)
 ```
 
-默认 `slippage_bps=30`，即卖出价比当前收盘价低 0.3%。
+默认 `slippage_bps=30`，即卖出价比下一根 K 线开盘价低 0.3%。
 
 ### 合成点差
 
-回测中没有真实盘口时，用当前收盘价构造：
+回测中没有真实盘口时，用下一根 K 线开盘价构造：
 
 ```text
-best_bid = close * (1 - synthetic_spread_bps / 20000)
-best_ask = close * (1 + synthetic_spread_bps / 20000)
+best_bid = next_bar.open * (1 - synthetic_spread_bps / 20000)
+best_ask = next_bar.open * (1 + synthetic_spread_bps / 20000)
 mid = (best_bid + best_ask) / 2
 spread_pct = (best_ask - best_bid) / mid
 ```
@@ -325,7 +327,7 @@ spread_pct = (best_ask - best_bid) / mid
 
 ```text
 last_buy_price is None
-or current.close <= last_buy_price * (1 - buy_grid_spacing_pct)
+or next_bar.open <= last_buy_price * (1 - buy_grid_spacing_pct)
 ```
 
 - T 仓额度通过：
@@ -396,6 +398,7 @@ t_value = current_t_qty * current.close
 | `cash_rejected` | `cash < signal.suggested_quote` | `insufficient cash` |
 | `grid_spacing_rejected` | 当前价格未比上次买入价低足够比例 | `buy grid spacing not reached` |
 | `t_bucket_cap_rejected` | T 仓额度不足以覆盖完整建议买入金额 | `T bucket cap exceeded` |
+| `max_layers_rejected` | 当前 T 仓层数已经达到 `StrategyConfig.max_layers` | `max layers reached` |
 | `position_rejected` | 策略给出 SELL 但没有 T 仓 | `no T position` |
 
 风险事件字段：
@@ -445,7 +448,7 @@ t_value = current_t_qty * current.close
 
 ```text
 qty = max(0, (quote - fee) / price)
-account.cash -= quote + fee
+account.cash -= quote
 account.positions[symbol] += qty
 ```
 
@@ -455,7 +458,7 @@ account.positions[symbol] += qty
 FillSnapshot(symbol, "buy", qty, price, fee, "filled")
 ```
 
-注意：这里现金扣减是 `quote + fee`，但数量计算是 `(quote - fee) / price`。也就是说 fee 同时减少买入数量并额外从 cash 中扣除，这是当前实现口径，后续若要和真实交易所严格对齐，需要单独修正并补回归测试。
+这里采用“名义金额内扣 fee”的口径：现金只减少 `quote`，fee 通过减少买入数量体现。
 
 ### Paper 卖出
 
@@ -508,6 +511,9 @@ FillSnapshot(symbol, "sell", qty, price, fee, "filled")
 | `tradePnls` | 每次卖出的 PnL |
 | `orderIntents` | 标准订单意图 |
 | `riskEvents` | 风险拒绝事件 |
+| `coreOnlyReturnPct` | 第一根 daily close 到最后一根 daily close 的核心仓只持有回报 |
+| `strategyVsCoreOnlyAlpha` | T 仓策略收益相对核心仓只持有基准的差值 |
+| `assetDetails` | 多标的完整审计明细，每个标的包含 equityCurve、trades、orderIntents、riskEvents |
 
 聚合 summary 当前包含：
 
@@ -525,8 +531,6 @@ FillSnapshot(symbol, "sell", qty, price, fee, "filled")
 - 当前没有 pending order worker。
 - 当前没有用户、权限、token、审计。
 - 当前没有真实 bid/ask 接入；回测点差是合成点差。
-- 当前 HTTP `source=CSV` 会进入 `CSVDataSource`，但没有传 `daily_path` 和 `intraday_path` 的 API 字段，因此会返回错误。
 - 当前 `source=Binance` 需要网络访问，网络不可用或 Binance 不支持该 symbol 时会返回错误。
-- 当前回测只持久化第一条资产结果的详细 `trades/equityCurve/orderIntents/riskEvents`，但 `assets/summary/symbols` 覆盖本次多标的聚合。
-- 当前 paper 手工订单没有应用 `max_spread_pct`、`market_data_max_age_sec`、`daily_loss_limit_quote`，因为 server 调用 `PaperExecutionAdapter` 时没有传这些运行时风险参数；这些能力在 adapter 层已经存在。
+- 当前 paper 手工订单应用了服务端默认 `max_order_quote`、`max_t_position_quote`、`max_spread_pct` 风控；`market_data_max_age_sec` 和 `daily_loss_limit_quote` 需要调用方传入运行时字段后才生效。
 - 当前系统所有 live 文案都应理解为“模拟/展示状态”，不是实盘账户状态。

@@ -39,7 +39,7 @@ class ExecutionModelTests(unittest.TestCase):
         intent = OrderIntent(symbol="NVDA", side="buy", quote_amount=500.0, source_signal="OPEN_T")
         fill = adapter.execute(intent, price=100.0, fee=1.0)
         self.assertEqual(fill.status, "filled")
-        self.assertAlmostEqual(account.cash, 499.0)
+        self.assertAlmostEqual(account.cash, 500.0)
         self.assertAlmostEqual(account.positions["NVDA"], 4.99)
 
     def test_paper_rejects_insufficient_cash(self):

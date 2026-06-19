@@ -367,6 +367,7 @@ h4 { margin-bottom: var(--space-sm); color: var(--muted); font-size: 0.82rem; }
 }
 
 .field input,
+.field select,
 .allocation-row input {
   width: 100%;
   min-height: 34px;

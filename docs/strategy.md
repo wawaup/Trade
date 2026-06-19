@@ -58,6 +58,7 @@ Trade 当前策略是“核心仓 + T 仓”的研究型回测策略。
 | `min_daily_atr_pct` | 0.018 | 日 K ATR 至少 1.8% 才算波动足够 |
 | `buy_grid_spacing_pct` | 0.012 | 加仓价格必须比上次买入价低 1.2% |
 | `flash_crash_pct` | 0.05 | 单根日内 K 线涨跌达到 5% 视为异常波动 |
+| `max_layers` | 3 | 最大 T 仓加仓层数；达到后拒绝继续买入 |
 
 ## 因子计算
 
@@ -74,13 +75,13 @@ Trade 当前策略是“核心仓 + T 仓”的研究型回测策略。
 
 ### VWAP
 
-`vwap(intraday)` 使用当前传入的完整日内窗口：
+策略使用 `session_vwap(intraday)`。它只使用最新 K 线所在交易日 session 内的日内 K 线，默认以 UTC 08:00 作为 session 重置点。
 
 ```text
 VWAP = sum(quote_volume) / sum(volume)
 ```
 
-当前实现没有在策略内部按交易日切片重置 VWAP；调用方传入什么 `intraday` 窗口，VWAP 就按该窗口累计。
+这样可以避免跨日 intraday 窗口把前一交易日价格和成交量带入当前日 VWAP。若后续接入具体市场，应按市场时区和交易时段调整 reset hour。
 
 ### 日 K ATR 百分比
 
@@ -370,11 +371,11 @@ cash = starting_quote * (1 - core_allocation_pct)
 
 ### 合成盘口点差
 
-回测用当前收盘价构造合成盘口：
+回测在信号 K 线收盘后生成信号，并在下一根 K 线开盘价上建模成交。合成盘口也围绕下一根 K 线开盘价构造：
 
 ```text
-best_bid = close * (1 - synthetic_spread_bps / 20000)
-best_ask = close * (1 + synthetic_spread_bps / 20000)
+best_bid = next_bar.open * (1 - synthetic_spread_bps / 20000)
+best_ask = next_bar.open * (1 + synthetic_spread_bps / 20000)
 spread_pct = (best_ask - best_bid) / mid
 ```
 
@@ -395,10 +396,10 @@ spread_pct = (best_ask - best_bid) / mid
 
 ```text
 last_buy_price is None
-or current.close <= last_buy_price * (1 - buy_grid_spacing_pct)
+or next_bar.open <= last_buy_price * (1 - buy_grid_spacing_pct)
 ```
 
-默认即当前收盘价必须比上一次买入价低至少 1.2%。
+默认即下一根 K 线开盘价必须比上一次买入成交价低至少 1.2%。
 
 不满足时：
 
@@ -427,10 +428,10 @@ or current.close <= last_buy_price * (1 - buy_grid_spacing_pct)
 买入成交价：
 
 ```text
-fill_price = current.close * (1 + slippage_bps / 10000)
+fill_price = next_bar.open * (1 + slippage_bps / 10000)
 ```
 
-默认 `slippage_bps=30`，即买入按当前收盘价上浮 0.3%。
+默认 `slippage_bps=30`，即买入按下一根 K 线开盘价上浮 0.3%。
 
 手续费：
 
@@ -472,10 +473,10 @@ qty = (quote - fee) / fill_price
 卖出成交价：
 
 ```text
-fill_price = current.close * (1 - slippage_bps / 10000)
+fill_price = next_bar.open * (1 - slippage_bps / 10000)
 ```
 
-默认 `slippage_bps=30`，即卖出按当前收盘价下浮 0.3%。
+默认 `slippage_bps=30`，即卖出按下一根 K 线开盘价下浮 0.3%。
 
 卖出金额与收益：
 
@@ -519,6 +520,8 @@ pnl = gross - fee - t_cost
 | `execution_assumptions` | 成交时点、手续费模型、paper-only 等假设 |
 | `order_intents` | 每次可执行信号对应的标准订单意图 |
 | `risk_events` | 信号被执行层拒绝的原因 |
+| `core_only_return_pct` | 核心仓只买入持有的 close-to-close 回报 |
+| `strategy_vs_core_only_alpha` | T 仓回测收益相对核心仓只持有基准的差值 |
 
 ## 当前未实现或需要特别注意的点
 
@@ -526,6 +529,9 @@ pnl = gross - fee - t_cost
 - 策略没有做空、反手、杠杆、限价单、追踪止损。
 - 策略没有多策略运行时；当前核心信号函数是 `generate_signal()`。
 - `max_t_bucket_pct` 在配置中存在，但当前回测 T 仓额度由 `core_allocation_pct` 反推。
-- 当前回测成交时点是当前建模 K 线收盘价，不是下一根开盘价。
+- 当前回测成交时点是下一根 K 线开盘价；仍未建模真实 order book、排队、部分成交和隔夜跳空。
 - 当前回测没有独立 warmup 截断；只通过最小日 K 和日内 K 数量保护。
-- 当前 HTTP 回测接口会调用所选 `DataSourceFactory` 数据源；CSV 数据源本身要求 `daily_path` 和 `intraday_path`，但 HTTP 接口目前没有暴露这两个路径参数。
+- 当前 HTTP 回测接口会调用所选 `DataSourceFactory` 数据源；`source=CSV` 时可通过 `dailyPath` 和 `intradayPath` 传入本地 CSV。
+- 当前止盈止损仍是固定百分比，没有按 ATR 动态调整。
+- 当前 confidence 仍未参与仓位大小计算。
+- 当前组合相关性、行业集中度、隔夜跳空、结算规则和券商账户规则尚未进入回测约束。

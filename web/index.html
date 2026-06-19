@@ -110,7 +110,7 @@ order_intent = signal_to_order_intent(
               <section class="qd-backtest-params">
                 <div class="section-head">
                   <h3>回测参数</h3>
-                  <span class="mode-pill">当前收盘价成交</span>
+                  <span class="mode-pill">下一根开盘成交</span>
                 </div>
                 <div class="qd-param-grid">
                   <div>
@@ -131,6 +131,19 @@ order_intent = signal_to_order_intent(
                     </div>
                   </div>
                   <div>
+                    <h4>数据源</h4>
+                    <label class="field">
+                      <span>Source</span>
+                      <select id="dataSourceSelect">
+                        <option value="Synthetic">Synthetic demo</option>
+                        <option value="CSV">CSV 本地历史数据</option>
+                        <option value="Binance">Binance spot</option>
+                      </select>
+                    </label>
+                    <label class="field"><span>Daily CSV 路径</span><input id="csvDailyPath" type="text" placeholder="/absolute/path/daily.csv"></label>
+                    <label class="field"><span>Intraday CSV 路径</span><input id="csvIntradayPath" type="text" placeholder="/absolute/path/intraday.csv"></label>
+                  </div>
+                  <div>
                     <h4>交易摩擦</h4>
                     <label class="field"><span>滑点 bps</span><input id="slippageBps" type="number" min="0" max="200" step="1" value="30"></label>
                     <label class="field"><span>点差 bps</span><input id="spreadBps" type="number" min="0" max="200" step="1" value="20"></label>
@@ -141,8 +154,8 @@ order_intent = signal_to_order_intent(
               <section class="qd-results-tabs">
                 <div class="segmented">
                   <button class="active" type="button" data-factor-target="assets">回测结果</button>
-                  <button type="button" data-factor-target="sensitivity">智能调参</button>
-                  <button type="button" data-factor-target="stress">压力测试</button>
+                  <button type="button" data-factor-target="sensitivity">参数敏感度示例</button>
+                  <button type="button" data-factor-target="stress">压力情景示例</button>
                   <button type="button" data-factor-target="trades">成交明细</button>
                 </div>
                 <div class="factor-panel active" data-factor-panel="assets">
@@ -164,11 +177,13 @@ order_intent = signal_to_order_intent(
                   </div>
                 </div>
                 <div class="factor-panel" data-factor-panel="sensitivity">
-                  <h3>参数敏感度</h3>
+                  <h3>参数敏感度示例</h3>
+                  <p class="form-message">当前为静态示例，用于展示未来真实敏感度分析的呈现方式。</p>
                   <div id="sensitivityBars" class="bars"></div>
                 </div>
                 <div class="factor-panel" data-factor-panel="stress">
-                  <h3>压力测试</h3>
+                  <h3>压力情景示例</h3>
+                  <p class="form-message">当前为静态示例，用于展示未来真实压力情景分析的呈现方式。</p>
                   <div id="stressList" class="stress-list"></div>
                 </div>
                 <div class="factor-panel" data-factor-panel="trades">

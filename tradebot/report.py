@@ -73,7 +73,7 @@ def render_html_report(summary: ResearchSummary, aggregate_metrics: BacktestMetr
       <table><thead><tr><th>标的</th><th>板块</th><th>收益</th><th>最大回撤</th><th>胜率</th><th>盈亏比</th></tr></thead><tbody>{rows_html}</tbody></table>
       <h2>参数高原测试</h2>
       <table><thead><tr><th>VWAP回踩阈值</th><th>收益</th><th>最大回撤</th></tr></thead><tbody>{sensitivity_html}</tbody></table>
-      <h2>压力测试</h2>
+      <h2>压力情景示例</h2>
       <table><thead><tr><th>场景</th><th>收益</th><th>最大回撤</th><th>交易数</th></tr></thead><tbody>{stress_html}</tbody></table>
       <h2>策略曲线</h2>
       <div class="chart">资金曲线占位点：{curve_points}</div>
@@ -88,4 +88,3 @@ def render_html_report(summary: ResearchSummary, aggregate_metrics: BacktestMetr
 def write_html_report(path: Path, summary: ResearchSummary, aggregate_metrics: BacktestMetrics) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_html_report(summary, aggregate_metrics), encoding="utf-8")
-
