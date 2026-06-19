@@ -4,6 +4,7 @@ import json
 
 from tradebot.fees import BinanceStockFeeModel
 from tradebot.market_quality import MarketQuality, market_quality_allows_trade
+from tradebot.metrics import calculate_metrics
 from tradebot.models import Candle, Trade
 from tradebot.strategy import StrategyConfig, generate_signal
 
@@ -266,3 +267,95 @@ def _core_only_return_pct(daily: list[Candle]) -> float:
     if len(daily) < 2 or daily[0].close <= 0:
         return 0.0
     return daily[-1].close / daily[0].close - 1
+
+
+@dataclass(frozen=True)
+class WalkForwardFold:
+    fold_index: int
+    in_sample_start: int  # bar index
+    in_sample_end: int
+    oos_start: int
+    oos_end: int
+    result: BacktestResult
+    oos_return_pct: float
+    oos_max_drawdown_pct: float
+    oos_win_rate: float
+
+
+@dataclass(frozen=True)
+class WalkForwardResult:
+    symbol: str
+    total_folds: int
+    folds: list[WalkForwardFold]
+    mean_oos_return_pct: float
+    median_oos_return_pct: float
+    positive_fold_rate: float  # % of folds with positive OOS return
+    mean_oos_max_drawdown_pct: float
+
+
+def run_walk_forward(
+    daily: list[Candle],
+    backtest_config: BacktestConfig,
+    strategy_config: StrategyConfig,
+    in_sample_bars: int = 40,
+    oos_bars: int = 20,
+    step_bars: int = 10,
+    symbol: str = "",
+) -> WalkForwardResult:
+    """Rolling walk-forward over daily bars.
+
+    For each fold:
+      - in_sample:  first `in_sample_bars` bars of the window (trend/MA warmup)
+      - oos:        next `oos_bars` bars  (out-of-sample evaluation)
+    The window advances by `step_bars` each fold.
+
+    The OOS bars are passed as the `intraday` argument to run_backtest so the
+    full strategy signal pipeline (VWAP, KDJ, MACD, gap check) runs on them.
+    The in-sample bars provide daily-trend context.
+    """
+    folds: list[WalkForwardFold] = []
+    n = len(daily)
+    window_size = in_sample_bars + oos_bars
+
+    for start in range(0, n - window_size + 1, step_bars):
+        is_end = start + in_sample_bars
+        oos_end = is_end + oos_bars
+        in_sample = daily[start:is_end]
+        oos = daily[is_end:oos_end]
+
+        result = run_backtest(in_sample, oos, backtest_config, strategy_config)
+        metrics = calculate_metrics(
+            backtest_config.starting_quote * (1 - backtest_config.core_allocation_pct),
+            result.equity_curve,
+            result.trade_pnls,
+        )
+        folds.append(WalkForwardFold(
+            fold_index=len(folds),
+            in_sample_start=start,
+            in_sample_end=is_end,
+            oos_start=is_end,
+            oos_end=oos_end,
+            result=result,
+            oos_return_pct=metrics.total_return_pct,
+            oos_max_drawdown_pct=metrics.max_drawdown_pct,
+            oos_win_rate=metrics.win_rate,
+        ))
+
+    if not folds:
+        return WalkForwardResult(symbol, 0, [], 0.0, 0.0, 0.0, 0.0)
+
+    returns = [f.oos_return_pct for f in folds]
+    sorted_returns = sorted(returns)
+    n_folds = len(folds)
+    mid = n_folds // 2
+    median = (sorted_returns[mid - 1] + sorted_returns[mid]) / 2 if n_folds % 2 == 0 else sorted_returns[mid]
+
+    return WalkForwardResult(
+        symbol=symbol,
+        total_folds=n_folds,
+        folds=folds,
+        mean_oos_return_pct=sum(returns) / n_folds,
+        median_oos_return_pct=median,
+        positive_fold_rate=sum(1 for r in returns if r > 0) / n_folds,
+        mean_oos_max_drawdown_pct=sum(f.oos_max_drawdown_pct for f in folds) / n_folds,
+    )

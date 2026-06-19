@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from tradebot.data import fetch_spot_klines, generate_synthetic_spcx, read_candles_csv
+from tradebot.data import fetch_klines_range, fetch_spot_klines, generate_synthetic_spcx, read_candles_csv
 
 
 class SyntheticDataSource:
@@ -30,6 +30,26 @@ class BinanceDataSource:
         )
 
 
+class BinanceHistoricalDataSource:
+    """Fetch a full historical range of daily bars from Binance for walk-forward testing."""
+
+    name = "BinanceHistorical"
+
+    def get_daily_range(self, symbol: str, start_ms: int, end_ms: int) -> list:
+        return fetch_klines_range(symbol, "1d", start_ms, end_ms)
+
+    def get_default_candles(self, symbol="SPCXBUSDT", start_ms=None, end_ms=None, **kwargs):
+        import time
+        now_ms = int(time.time() * 1000)
+        if end_ms is None:
+            end_ms = now_ms
+        if start_ms is None:
+            start_ms = now_ms - 540 * 86_400_000  # ~18 months default
+        daily = self.get_daily_range(symbol, start_ms, end_ms)
+        intraday = fetch_spot_klines(symbol, "1m", 240)
+        return daily, intraday
+
+
 class DataSourceFactory:
     _ALIASES = {
         "synthetic": "Synthetic",
@@ -39,11 +59,15 @@ class DataSourceFactory:
         "file": "CSV",
         "binance": "Binance",
         "spot": "Binance",
+        "binancehistorical": "BinanceHistorical",
+        "historical": "BinanceHistorical",
+        "history": "BinanceHistorical",
     }
     _SOURCES = {
         "Synthetic": SyntheticDataSource,
         "CSV": CSVDataSource,
         "Binance": BinanceDataSource,
+        "BinanceHistorical": BinanceHistoricalDataSource,
     }
 
     @classmethod
@@ -67,4 +91,5 @@ class DataSourceFactory:
             {"id": "Synthetic", "label": "Synthetic demo data", "requiresNetwork": False},
             {"id": "CSV", "label": "Local CSV files", "requiresNetwork": False},
             {"id": "Binance", "label": "Binance public klines", "requiresNetwork": True},
+            {"id": "BinanceHistorical", "label": "Binance historical range (walk-forward)", "requiresNetwork": True},
         ]

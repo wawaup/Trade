@@ -37,6 +37,39 @@ def fetch_spot_klines(symbol: str, interval: str, limit: int = 500) -> list[Cand
     return [parse_binance_kline(row) for row in data]
 
 
+def fetch_klines_range(
+    symbol: str,
+    interval: str,
+    start_ms: int,
+    end_ms: int,
+    max_pages: int = 200,
+) -> list[Candle]:
+    """Fetch all klines in [start_ms, end_ms] via paginated Binance API calls."""
+    candles: list[Candle] = []
+    cursor = start_ms
+    for _ in range(max_pages):
+        if cursor >= end_ms:
+            break
+        params = urllib.parse.urlencode({
+            "symbol": symbol,
+            "interval": interval,
+            "startTime": cursor,
+            "endTime": end_ms,
+            "limit": 1000,
+        })
+        url = f"{BINANCE_REST_BASE}/api/v3/klines?{params}"
+        with urllib.request.urlopen(url, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if not data:
+            break
+        batch = [parse_binance_kline(row) for row in data]
+        candles.extend(batch)
+        if len(data) < 1000:
+            break
+        cursor = batch[-1].close_time + 1
+    return candles
+
+
 def session_start_ms(timestamp_ms: int, reset_utc_hour: int = 8) -> int:
     if not 0 <= reset_utc_hour <= 23:
         raise ValueError("reset_utc_hour must be in 0..23")
