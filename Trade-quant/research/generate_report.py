@@ -136,7 +136,7 @@ function renderTable(period){
   <div class="tbl-wrap"><table>
   <thead><tr>
     <th>标的</th>
-    <th title="同仓位被动持有(蓝筹80%/波动70%)">同仓持有%</th><th>策略%</th>
+    <th title="同仓位被动持有(小波80%/大波70%)">同仓持有%</th><th>策略%</th>
     <th title="策略% - 同仓持有%">超额α%</th><th>T贡献%</th>
     <th>核心操作</th><th>T入场</th><th>T胜率</th>
   </tr></thead><tbody>`;
@@ -145,7 +145,7 @@ function renderTable(period){
     if(err){html+=`<tr><td>${r.symbol}</td><td colspan="7" style="color:#8892a4">${err}</td></tr>`;continue;}
     const h=r['hold%'],s=r['strategy%'],a=r['alpha%'],tp=r['t_pnl%'];
     html+=`<tr>
-      <td>${r.symbol} <span style="color:#8892a4;font-size:11px">${r.type==='volatile'?'(波)':'(蓝)'}</span></td>
+      <td>${r.symbol} <span style="color:#8892a4;font-size:11px">${r.type==='large_vol'?'(大)':'(小)'}</span></td>
       <td class="${cls(h)}">${fmt(h)}%</td>
       <td class="${cls(s)}">${fmt(s)}%</td>
       <td class="${alphaCls(a)}">${fmt(a)}%</td>
@@ -358,7 +358,7 @@ def build_html(data: dict) -> str:
     subtitle = (
         f"日线过滤 MA5&gt;10&gt;20&gt;30 · 2H双根信号建仓（不主动减仓）· "
         f"T仓 VWAP/MACD入场 + 2H连续2根跌破MA5出场 · "
-        f"蓝筹核心80% / 波动70% · T仓20% · "
+        f"小波核心80% / 大波70% · T仓20% · "
         f"生成时间: {gen_time}"
     )
 

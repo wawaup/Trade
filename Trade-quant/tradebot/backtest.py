@@ -29,6 +29,7 @@ class BacktestResult:
     fees_paid: float
     trades: list[Trade]
     equity_curve: list[float]
+    equity_curve_ts: list[int]
     trade_pnls: list[float]
     result_id: str = ""
     engine_version: str = "tradebot-backtest-v2"
@@ -56,6 +57,7 @@ def run_backtest(
     fees_paid = 0.0
     trades: list[Trade] = []
     equity_curve: list[float] = [cash]
+    equity_curve_ts: list[int] = [intraday[1].open_time if len(intraday) > 1 else 0]
     trade_pnls: list[float] = []
     order_intents: list[dict] = []
     risk_events: list[dict] = []
@@ -179,6 +181,7 @@ def run_backtest(
             layers = 0
 
         equity_curve.append(cash + t_qty * fill_bar.close)
+        equity_curve_ts.append(fill_bar.open_time)
 
     last_price = intraday[-1].close if intraday else 0.0
     t_position_value = t_qty * last_price
@@ -218,6 +221,7 @@ def run_backtest(
         fees_paid=fees_paid,
         trades=trades,
         equity_curve=equity_curve,
+        equity_curve_ts=equity_curve_ts,
         trade_pnls=trade_pnls,
         result_id=f"bt_{result_hash}",
         engine_version="tradebot-backtest-v2",

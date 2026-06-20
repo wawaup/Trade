@@ -16,8 +16,10 @@ def serialize_trade(trade) -> dict:
     }
 
 
-def serialize_equity_curve(values: list[float]) -> list[dict]:
-    return [{"index": idx, "value": value} for idx, value in enumerate(values)]
+def serialize_equity_curve(values: list[float], timestamps: Optional[list[int]] = None) -> list[dict]:
+    if timestamps and len(timestamps) == len(values):
+        return [{"time": ts // 1000, "value": round(value, 4)} for ts, value in zip(timestamps, values)]
+    return [{"index": idx, "value": round(value, 4)} for idx, value in enumerate(values)]
 
 
 def serialize_backtest_result(
@@ -40,7 +42,7 @@ def serialize_backtest_result(
         "executionAssumptions": result.execution_assumptions,
         "summary": summary,
         "assets": assets,
-        "equityCurve": serialize_equity_curve(result.equity_curve),
+        "equityCurve": serialize_equity_curve(result.equity_curve, getattr(result, "equity_curve_ts", None)),
         "trades": [serialize_trade(trade) for trade in result.trades],
         "tradePnls": list(result.trade_pnls),
         "orderIntents": [_plain_dict(row) for row in result.order_intents],
@@ -57,7 +59,7 @@ def serialize_asset_result_detail(symbol: str, theme: str, result: BacktestResul
         "metrics": dict(metrics or {}),
         "configSnapshot": result.config_snapshot,
         "executionAssumptions": result.execution_assumptions,
-        "equityCurve": serialize_equity_curve(result.equity_curve),
+        "equityCurve": serialize_equity_curve(result.equity_curve, getattr(result, "equity_curve_ts", None)),
         "trades": [serialize_trade(trade) for trade in result.trades],
         "tradePnls": list(result.trade_pnls),
         "orderIntents": [_plain_dict(row) for row in result.order_intents],

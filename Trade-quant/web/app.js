@@ -711,8 +711,8 @@ async function runReviewAnalysis() {
     });
     const body = await resp.json();
     if (!resp.ok) {
-      const hint = resp.status === 502 && isBinanceSource(ctrl.source)
-        ? "Binance 不支持美股代码，请切换至 Synthetic 或 CSV"
+      const hint = resp.status === 502 && isBinanceCryptoSource(ctrl.source)
+        ? "Binance 加密现货不支持此代码，请选 Binance bStocks（实时）"
         : body.error;
       status.textContent = `失败：${hint}`;
       status.className = "review-status-text negative";
@@ -843,20 +843,22 @@ function collectBacktestControls() {
   };
 }
 
-function isBinanceSource(source) {
-  return (source || "").toLowerCase().includes("binance");
+function isBinanceCryptoSource(source) {
+  // Only the plain "Binance" source (crypto) doesn't understand US-style symbols.
+  // "BinanceSpot" handles bStocks natively via symbol mapping – no warning needed.
+  return source === "Binance";
 }
 
 function looksLikeUsStock(symbol) {
-  // Simple heuristic: no USDT/BTC/ETH/BNB suffix → US stock
+  // Simple heuristic: no USDT/BTC/ETH/BNB suffix → project uses US-style code
   return !/USDT|USDC|BTC|ETH|BNB|BUSD/i.test(symbol);
 }
 
 function warnBinanceUsStock(source, symbols, warningElId) {
   const el = document.getElementById(warningElId);
   if (!el) return;
-  if (isBinanceSource(source) && symbols.some(looksLikeUsStock)) {
-    el.textContent = "⚠ Binance 不支持美股代码（SPCX/TSLA/NVDA 等），请切换至 Synthetic 或 CSV。";
+  if (isBinanceCryptoSource(source) && symbols.some(looksLikeUsStock)) {
+    el.textContent = "⚠ Binance 加密现货不支持此代码，请选 Binance bStocks（实时）或 Synthetic。";
     el.className = "form-message warning";
     el.style.display = "";
   } else {
@@ -876,8 +878,8 @@ async function runBacktestFromControls() {
   });
   const body = await response.json();
   if (!response.ok) {
-    const hint = response.status === 502 && isBinanceSource(payload.source)
-      ? "Binance 不支持此标的，请切换 Synthetic 或 CSV 数据源"
+    const hint = response.status === 502 && isBinanceCryptoSource(payload.source)
+      ? "Binance 加密现货不支持此标的，请选 Binance bStocks（实时）"
       : body.error;
     statusEl.textContent = `回测失败：${hint}`;
     return;

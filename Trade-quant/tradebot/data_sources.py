@@ -1,8 +1,46 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 from tradebot.data import fetch_klines_range, fetch_spot_klines, generate_synthetic_spcx, read_candles_csv
 
 DATA_ROOT = Path(__file__).resolve().parents[1] / "data"
+
+# ---------------------------------------------------------------------------
+# Binance bStocks – symbol mapping and epoch
+# ---------------------------------------------------------------------------
+# bStocks are listed on Binance Spot (not Futures / Alpha).
+# API symbol = no slash, suffix B + USDT. e.g. SPCX → SPCXBUSDT
+BSTOCK_SYMBOL_MAP: dict[str, str] = {
+    "SPCX":  "SPCXBUSDT",   # SpaceX   – opened 2026-06-12
+    "TSLA":  "TSLABUSDT",   # Tesla    – opened 2026-06-11
+    "NVDA":  "NVDABUSDT",   # NVIDIA   – opened 2026-06-11
+    "MU":    "MUBUSDT",     # Micron   – opened 2026-06-11
+    "CRCL":  "CRCLBUSDT",   # Circle   – opened 2026-06-11
+    "CPOX":  "CRCLBUSDT",   # project alias for Circle bStocks
+    "SNDK":  "SNDKBUSDT",   # SanDisk  – opened 2026-06-11
+}
+
+# bStocks have no history before 2026-06-10; use this as the earliest startTime
+BSTOCK_EPOCH_MS: int = int(datetime(2026, 6, 10, tzinfo=timezone.utc).timestamp() * 1000)
+
+# Map UI resolution strings → Binance interval parameter (case-sensitive on API)
+_RESOLUTION_TO_INTERVAL: dict[str, str] = {
+    "1m":    "1m",
+    "3m":    "3m",
+    "5m":    "5m",
+    "15m":   "15m",
+    "30m":   "30m",
+    "1h":    "1h",
+    "2h":    "2h",
+    "4h":    "4h",
+    "6h":    "6h",
+    "8h":    "8h",
+    "12h":   "12h",
+    "1d":    "1d",
+    "1day":  "1d",
+    "daily": "1d",
+    "1w":    "1w",
+}
 
 
 def resolve_data_file(path_value, data_root: Path = DATA_ROOT) -> Path:
@@ -44,6 +82,46 @@ class BinanceDataSource:
         )
 
 
+class BinanceSpotBStocksDataSource:
+    """Fetch live bStocks K-lines from Binance Spot API.
+
+    Automatically maps internal project symbols (SPCX, TSLA, …) to the
+    correct Binance API symbols (SPCXBUSDT, TSLABUSDT, …).
+
+    Resolution is honoured: pass resolution='15m' to get 15-minute bars,
+    '1h' for hourly bars, etc.  The daily bars (returned as the first element
+    of the tuple) are always fetched at '1d' granularity so the backtest
+    trend layer works correctly.
+    """
+
+    name = "BinanceSpot"
+
+    @staticmethod
+    def resolve_symbol(symbol: str) -> str:
+        """Return the Binance API symbol for a given UI/project symbol."""
+        s = str(symbol or "SPCX").upper()
+        return BSTOCK_SYMBOL_MAP.get(s, s)  # fall through unchanged if already an API symbol
+
+    def get_default_candles(self, symbol: str = "SPCX", resolution: str = "1h", **kwargs):
+        import time as _time
+
+        api_symbol = self.resolve_symbol(symbol)
+        now_ms = int(_time.time() * 1000)
+
+        interval = _RESOLUTION_TO_INTERVAL.get(str(resolution).lower(), "1h")
+
+        # Intraday bars at the requested resolution
+        intraday_bars = fetch_klines_range(api_symbol, interval, BSTOCK_EPOCH_MS, now_ms)
+
+        # Daily bars (needed for the strategy trend layer in backtesting)
+        if interval == "1d":
+            daily_bars = intraday_bars
+        else:
+            daily_bars = fetch_klines_range(api_symbol, "1d", BSTOCK_EPOCH_MS, now_ms)
+
+        return daily_bars, intraday_bars
+
+
 class BinanceHistoricalDataSource:
     """Fetch a full historical range of daily bars from Binance for walk-forward testing."""
 
@@ -73,6 +151,11 @@ class DataSourceFactory:
         "file": "CSV",
         "binance": "Binance",
         "spot": "Binance",
+        # BinanceSpot / bStocks aliases
+        "binancespot": "BinanceSpot",
+        "bstocks": "BinanceSpot",
+        "bstock": "BinanceSpot",
+        "binancebstocks": "BinanceSpot",
         "binancehistorical": "BinanceHistorical",
         "historical": "BinanceHistorical",
         "history": "BinanceHistorical",
@@ -81,6 +164,7 @@ class DataSourceFactory:
         "Synthetic": SyntheticDataSource,
         "CSV": CSVDataSource,
         "Binance": BinanceDataSource,
+        "BinanceSpot": BinanceSpotBStocksDataSource,
         "BinanceHistorical": BinanceHistoricalDataSource,
     }
 
@@ -104,6 +188,7 @@ class DataSourceFactory:
         return [
             {"id": "Synthetic", "label": "Synthetic demo data", "requiresNetwork": False},
             {"id": "CSV", "label": "Local CSV files", "requiresNetwork": False},
-            {"id": "Binance", "label": "Binance public klines", "requiresNetwork": True},
-            {"id": "BinanceHistorical", "label": "Binance historical range (walk-forward)", "requiresNetwork": True},
+            {"id": "BinanceSpot", "label": "Binance bStocks 实时行情", "requiresNetwork": True},
+            {"id": "Binance", "label": "Binance 加密货币现货 K 线", "requiresNetwork": True},
+            {"id": "BinanceHistorical", "label": "Binance 历史区间（滚动回测）", "requiresNetwork": True},
         ]

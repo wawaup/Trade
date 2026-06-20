@@ -20,6 +20,39 @@
 | `CSV` | `csv`, `file` | 本地 CSV 文件 | 否 | 可通过 HTTP `dailyPath` / `intradayPath` 传入本地文件路径 |
 | `Binance` | `binance`, `spot` | Binance public spot klines | 是 | 需要网络；沙盒或网络不可用时可能失败 |
 
+### 数据源与标的匹配说明
+
+**主要标的**：`SPCXB/USDT`，即 Binance B-Stock 代币化股票，Binance API 可直接获取其 K 线数据。
+
+**什么是 B-Stock（代币化股票）**：Binance 将部分美股（如 SPCX）以 1:1 方式发行成链上代币（symbol 加 B 后缀），用户可在币安直接用 USDT 交易，无需开设美股账户。价格锚定底层美股，由持牌托管商（CM-Equity）保证 1:1 备兑。
+
+当前各数据源实际可用范围：
+
+| 数据源 | 可用标的范围 | 说明 |
+|---|---|---|
+| `Binance` | `SPCXB/USDT` 及其他 B-Stock、主流加密货币 | **主力数据源**，可直接获取真实 SPCXB K 线 |
+| `CSV` | 用户自行提供的任意市场数据 | 导入历史数据、离线回测 |
+| `Synthetic` | 任意 symbol（合成数据） | 验证代码逻辑，参数无真实市场意义 |
+
+### B-Stock 与普通美股的关键差异
+
+使用 Binance B-Stock 数据时，以下特性与直接交易美股不同，会影响策略参数：
+
+| 特性 | 普通美股 | Binance B-Stock（SPCXB） |
+|---|---|---|
+| 交易时段 | 仅美东时间 9:30~16:00 | 币安平台交易时间（可能更长但流动性集中在美股时段） |
+| VWAP session 重置 | 按美东时区开盘重置 | 当前代码以 UTC 08:00 重置，需确认是否符合 SPCXB 活跃时段 |
+| 流动性 | 纽交所/纳斯达克深度 | 币安盘口深度，通常低于底层市场 |
+| 价格跟踪 | 直接定价 | 锚定底层股票，可能有轻微溢价/折价 |
+| 交易手续费 | 券商佣金 | 币安现货手续费（默认 0.1%，VIP 或 BNB 抵扣可更低） |
+| 停牌/分红 | 依美股规则 | Binance 会公告停牌或调整，行为可能与底层股票有延迟 |
+
+**VWAP 重置时间注意**：当前代码 `session_vwap()` 以 UTC 08:00 作为每日 session 重置点。SPCXB 在美股开盘前（UTC 14:30）流动性极低，建议将 reset hour 调整为 **UTC 13:30**（美东 9:30 开盘时间），使 VWAP 真正反映当天美股活跃时段的成交均价。
+
+后续接入 IBKR（美股直连）的推荐路径：
+- 新增 `IBKR` DataSource 适配器，接入真实美股行情和历史 K 线
+- 届时 SPCX（无 B 后缀）的 VWAP session 应按 NYSE 交易时段重置
+
 ### Candle 接口
 
 所有数据源都必须返回：
@@ -107,13 +140,15 @@ vwap = cumulative_quote / cumulative_volume
 
 内置标的主题：
 
-| Symbol | Theme |
-|---|---|
-| `SPCX` | 商业航天/星链 |
-| `TSLA` | 科技巨头/高流动性 |
-| `NVDA` | AI芯片/高流动性 |
-| `MU` | 存储周期 |
-| `CPOX` | CPO光通信 |
+| Symbol | 实际可交易形式 | Theme |
+|---|---|---|
+| `SPCX` | 币安 B-Stock：`SPCXB/USDT` | 商业航天/星链 |
+| `TSLA` | 币安 B-Stock：`TSLABUSDT`；或 IBKR 美股 | 科技巨头/高流动性 |
+| `NVDA` | IBKR 美股（B-Stock 可用性以币安公告为准） | AI芯片/高流动性 |
+| `MU` | IBKR 美股 | 存储周期 |
+| `CPOX` | IBKR 美股 | CPO光通信 |
+
+**当前主力标的**：`SPCXB`（SPCX 的币安 B-Stock 版本），通过 `source=Binance` + `symbol=SPCXB` 可获取真实 K 线数据。
 
 如果请求的 symbol 不在内置列表中，系统会按 `自定义标的` 主题运行。
 
@@ -527,10 +562,52 @@ FillSnapshot(symbol, "sell", qty, price, fee, "filled")
 
 ## 当前边界和风险
 
-- 当前没有真实交易所下单。
-- 当前没有 pending order worker。
-- 当前没有用户、权限、token、审计。
-- 当前没有真实 bid/ask 接入；回测点差是合成点差。
-- 当前 `source=Binance` 需要网络访问，网络不可用或 Binance 不支持该 symbol 时会返回错误。
-- 当前 paper 手工订单应用了服务端默认 `max_order_quote`、`max_t_position_quote`、`max_spread_pct` 风控；`market_data_max_age_sec` 和 `daily_loss_limit_quote` 需要调用方传入运行时字段后才生效。
-- 当前系统所有 live 文案都应理解为“模拟/展示状态”，不是实盘账户状态。
+### 执行层边界
+
+- 当前没有真实交易所下单，全部为 paper-only 模拟。
+- 当前没有 pending order worker；所有订单同步处理，不排队。
+- 当前没有用户、权限、token、审计日志；不能多用户隔离。
+- 当前没有真实 bid/ask 接入；回测点差是合成点差（`synthetic_spread_bps`）。
+- 当前 `source=Binance` 需要网络访问，网络不可用或 Binance 不支持该 symbol 时会返回 502 错误。
+
+### 手工 Paper 下单风控
+
+`POST /api/paper/orders` 当前仍是 paper-only 同步模拟订单，但已经接入服务端 `RiskLimits` 和 T 仓状态检查：
+
+| 检查项 | 回测层 | 手工 paper 下单 |
+|---|---|---|
+| 合成点差过宽拒绝 | ✅ | ✅（`spreadPct` 输入触发） |
+| 市场数据新鲜度 | ✅（可配置） | ✅（`marketDataAgeSec` 输入触发，默认 30 秒） |
+| 日内最大亏损上限 | ✅（可配置） | ✅（服务端累计 `PAPER_DAILY_LOSS`，默认 500 quote） |
+| 加仓网格间距 | ✅ | ✅（按 `PAPER_LAST_BUY_PRICE` 检查） |
+| 最大层数限制 | ✅ | ✅（按 `PAPER_T_LAYERS` 检查） |
+| T 仓市值上限 | ✅ | ✅（`max_t_position_quote`） |
+| 单笔金额上限 | ✅（可配置） | ✅（`max_order_quote`） |
+
+手工 paper 卖出成功后会同步更新 `PAPER_POSITION_COST`、`PAPER_T_LAYERS` 和 `PAPER_LAST_BUY_PRICE`。当一次卖出释放至少一层 T 仓时，旧买价会被清理，后续买入不会被已释放层的网格状态误拒。
+
+仍需注意：这些检查依赖调用方提供 `spreadPct` 和 `marketDataAgeSec`。在接入真实 broker 前，还必须接入真实 bid/ask、真实行情时间戳、订单幂等 key、权限、审计日志和券商回报对账。
+
+### 结算规则与交易限制
+
+本系统的做 T 策略（当天买入、当天卖出同一标的）在不同市场受不同规则约束：
+
+**币安 B-Stock（SPCXB/USDT，当前主要标的）**
+
+- 币安现货属于加密货币交易规则，**不受美股 PDT 规则约束**，可以无限制当日往返交易
+- 结算为即时结算（T+0），买入后立即可卖，不存在资金锁定期
+- 注意：币安 B-Stock 流动性比底层美股低，深度不足时成交价会偏离理论价；当策略建议金额较大时，实际滑点可能高于回测假设的 0.3%
+
+**美股（未来通过 IBKR 扩展时）**
+
+- 允许 T+0，但受 **PDT 规则**约束：保证金账户净值 < $25,000，5 个交易日内 4 次以上当日往返会被标记限制
+- 建议使用现金账户（Cash Account）规避 PDT 限制
+
+**A 股（如果未来扩展）**
+
+- A 股是 T+1 结算：当天买入的股不能当天卖出
+- “正 T”需要先有底仓，操作顺序是”先卖后买”；当前代码框架不适配，需要专门设计
+
+### 当前系统状态声明
+
+当前系统所有”账户余额”、”持仓”、”收益”均为 paper 模拟数据，不代表任何真实账户状态。所有回测结果仅反映在历史合成数据或 CSV 数据上的假设成交，不保证对未来真实市场的预测有效性。

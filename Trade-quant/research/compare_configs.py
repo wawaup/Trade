@@ -3,11 +3,8 @@
 
 核心问题：主动管理（核心仓+T仓）是否优于同仓位被动持有？
 
-三列对比：
-  持有%  = 用同等核心仓比例买入持有（蓝筹80%/波动70%仓，其余现金）
-  策略%  = 核心仓主动管理 + T仓
-  α%     = 策略% - 持有%（正=主动管理赚到了，负=不如直接持有）
-  T贡献% = T仓所有交易盈亏之和 / 初始资金（正=T仓有价值，负=T仓拖累）
+α% = 策略% - 持有%（正=主动管理赚到了，负=不如直接持有）
+T贡献% = T仓盈亏之和 / 初始资金
 
 用法：
     python compare_configs.py
@@ -22,21 +19,71 @@ from backtest_engine import (
     StrategyConfig, load_raw, compute_indicators, run_backtest
 )
 
+# ── 标的列表：(代码, 波动类型, 显示名称, 赛道) ────────────────────────────
+# 波动分类依据：2024-07 以来日内振幅>5%占比 ≥20% = 大波动，<20% = 小波动
+
 SYMBOLS = [
-    # 美股
-    ("NVDA",       "volatile"),
-    ("TSLA",       "volatile"),
-    ("AAPL",       "bluechip"),
-    ("MSFT",       "bluechip"),
-    ("MU",         "volatile"),
-    # 加密
-    ("BTC-USD",    "volatile"),
-    ("ETH-USD",    "volatile"),
-    # 韩股（VWAP时区近似）
-    ("000660.KS",  "volatile"),   # SK海力士
-    ("005930.KS",  "volatile"),   # 三星电子（HBM/存储，走势更像波动股）
-    # 港股（VWAP时区近似）
-    ("1810.HK",    "volatile"),   # 小米
+    # AI 算力
+    ("NVDA",      "small_vol", "NVDA",    "AI算力"),      # 16%
+    ("AMD",       "small_vol", "AMD",     "AI算力"),      #  4%
+    # AI 芯片 & 网络
+    ("AVGO",      "small_vol", "AVGO",    "AI芯片&网络"), #  3%
+    ("MRVL",      "small_vol", "MRVL",    "AI芯片&网络"), #  7%
+    # HBM 存储
+    ("MU",        "large_vol", "MU",      "HBM存储"),     # 30%
+    ("SNDK",      "large_vol", "SNDK",    "SNDK"),        # 22%
+    ("000660.KS", "large_vol", "SK海力士","HBM存储"),     # 20%
+    ("005930.KS", "small_vol", "三星",    "HBM存储"),     # 10%
+    # 半导体上游
+    ("TSM",       "small_vol", "TSM",     "半导体上游"),  #  1%
+    ("ASML",      "small_vol", "ASML",    "半导体上游"),  #  1%
+    # AI 云平台
+    ("MSFT",      "small_vol", "MSFT",    "AI云平台"),    #  1%
+    ("GOOGL",     "small_vol", "GOOGL",   "AI云平台"),    #  1%
+    # 网络安全
+    ("CRWD",      "small_vol", "CRWD",    "网络安全"),    #  2%
+    ("PANW",      "small_vol", "PANW",    "网络安全"),    #  2%
+    # 量子（高波动主题）
+    ("IONQ",      "large_vol", "IONQ",    "量子"),        # 35%
+    ("QBTS",      "large_vol", "QBTS",    "量子"),        # 44%
+    # 太空防务（高波动主题）
+    ("RKLB",      "large_vol", "RKLB",    "太空防务"),    # 23%
+    ("LMT",       "small_vol", "LMT",     "太空防务"),    #  1%
+    # 加密货币
+    ("ETH-USD",   "large_vol", "ETH",     "加密货币"),    # 43%
+    ("BTC-USD",   "large_vol", "BTC",     "加密货币"),    # 19%→加密归大
+    # 消费科技
+    ("TSLA",      "large_vol", "TSLA",    "消费科技"),    # 29%
+    ("1810.HK",   "small_vol", "小米",    "消费科技"),    # 19%
+    ("AAPL",      "small_vol", "AAPL",    "消费科技"),    #  3%
+]
+
+# ── Serenity 专属选股池 ────────────────────────────────────────────────────
+# Serenity 风格：不买最显眼的主线，往上游/平台/基础设施渗透
+SYMBOLS_SERENITY = [
+    # 光通信 / CPO / 光子学
+    ("AAOI",  "large_vol", "AAOI",   "光通信CPO"),   # 41%
+    ("AXTI",  "large_vol", "AXTI",   "光通信CPO"),   # 39%
+    ("LITE",  "small_vol", "LITE",   "光通信CPO"),   # 12%
+    ("COHR",  "small_vol", "COHR",   "光通信CPO"),   # 11%
+    ("FN",    "small_vol", "FN",     "光通信CPO"),   #  8%
+    ("NOK",   "small_vol", "NOK",    "光通信CPO"),   #  3%
+    # 半导体制造 / 封测 / ASIC
+    ("TSEM",  "small_vol", "TSEM",   "封测ASIC"),    #  6%
+    ("GFS",   "small_vol", "GFS",    "封测ASIC"),    #  4%
+    ("ASX",   "small_vol", "ASE",    "封测ASIC"),    #  2%  ASE Technology
+    ("AMKR",  "small_vol", "AMKR",   "封测ASIC"),    #  5%
+    ("AEHR",  "large_vol", "AEHR",   "封测ASIC"),    # 29%
+    ("ACMR",  "small_vol", "ACMR",   "封测ASIC"),    #  9%
+    # AI 电力 / 数据中心基础设施
+    ("VRT",   "small_vol", "VRT",    "AI电力DC"),    #  7%
+    ("VICR",  "small_vol", "VICR",   "AI电力DC"),    # 13%
+    ("ETN",   "small_vol", "ETN",    "AI电力DC"),    #  1%
+    ("SIEGY", "small_vol", "Siemens","AI电力DC"),    #  0%
+    # 存储 / HBM / NAND
+    ("MU",    "large_vol", "MU",     "存储HBM"),     # 30%
+    ("SNDK",  "large_vol", "SNDK",   "存储HBM"),     # 22%
+    ("EWY",   "small_vol", "EWY",    "韩股ETF"),     #  2%
 ]
 
 PERIODS = [
@@ -46,36 +93,21 @@ PERIODS = [
 ]
 
 
-# ── 买入持有基准 ───────────────────────────────────────────────────────────
+# ── 买入持有基准 ──────────────────────────────────────────────────────────
 
 def buy_and_hold_return(raw: pd.DataFrame, core_pct: float = 0.70) -> float:
-    """
-    同等仓位买入持有：用 core_pct 比例资金建仓，其余现金（收益率=0）。
-    这样与策略的核心仓形成公平对比（策略也只用 core_pct 买入核心仓）。
-    """
     first = raw["close"].iloc[0]
     last  = raw["close"].iloc[-1]
-    stock_ret = (last / first - 1)
-    return stock_ret * core_pct * 100
+    return (last / first - 1) * core_pct * 100
 
 
-# ── 策略回测 + 拆解 ────────────────────────────────────────────────────────
+# ── 策略回测 + 拆解 ───────────────────────────────────────────────────────
 
 CORE_BUY_ACTIONS  = {"CORE_BUY"}
 CORE_SELL_ACTIONS = {"CORE_EOD", "CORE_STOP"}
 
 
-def run_and_decompose(symbol, stock_type, since, until=None, d_trend_min_mas=6):
-    """
-    返回字典：
-      hold%      区间全仓持有收益
-      strategy%  策略总收益
-      alpha%     strategy - hold（超额α）
-      t_pnl%     T仓累计盈亏 / 初始资金（T仓单独贡献）
-      core_turns 核心仓操作次数（含分段买卖）
-      t_entries  T仓入场次数
-      t_winrate  T仓胜率%
-    """
+def run_and_decompose(symbol, stock_type, since, until=None, d_trend_min_mas=4):
     try:
         raw = load_raw(symbol, "1h")
         raw = raw.loc[since:] if since else raw
@@ -97,20 +129,16 @@ def run_and_decompose(symbol, stock_type, since, until=None, d_trend_min_mas=6):
         t_exits = [t for t in trades if t.action in ("T_TP", "T_STOP", "T_EOD")]
         t_buys  = [t for t in trades if t.action == "T_BUY"]
         t_pnls  = [t.pnl_pct for t in t_exits if t.pnl_pct is not None]
-        t_pos_value  = initial * cfg.t_pct
-        t_contribution = sum(p * t_pos_value for p in t_pnls) / initial * 100
+        t_contribution = sum(p * initial * cfg.t_pct for p in t_pnls) / initial * 100
         t_win = (sum(1 for p in t_pnls if p > 0) / len(t_pnls) * 100) if t_pnls else 0
 
         core_ops = [t for t in trades if t.action in CORE_BUY_ACTIONS | CORE_SELL_ACTIONS]
 
-        # 归一化净值曲线（100基准）和标的价格曲线
-        eq_norm    = (equity_series / initial * 100).round(2)
-        hold_norm  = (raw["close"] / raw["close"].iloc[0] * 100).round(2)
-        # 对齐时间轴
+        eq_norm   = (equity_series / initial * 100).round(2)
+        hold_norm = (raw["close"] / raw["close"].iloc[0] * 100).round(2)
         common_idx = eq_norm.index.intersection(hold_norm.index)
         eq_norm    = eq_norm.reindex(common_idx).ffill()
         hold_norm  = hold_norm.reindex(common_idx).ffill()
-
         times = [str(x)[:16] for x in common_idx]
 
         return {
@@ -121,11 +149,9 @@ def run_and_decompose(symbol, stock_type, since, until=None, d_trend_min_mas=6):
             "core_turns": len(core_ops),
             "t_entries":  len(t_buys),
             "t_winrate":  round(t_win, 0),
-            # 曲线数据（给HTML图表用）
             "times":      times,
             "eq_curve":   eq_norm.tolist(),
             "hold_curve": hold_norm.tolist(),
-            # 交易标记（给图表标点用）
             "trade_marks": [
                 {"t": str(tr.time)[:16], "action": tr.action,
                  "price": tr.price, "pnl": tr.pnl_pct}
@@ -136,7 +162,7 @@ def run_and_decompose(symbol, stock_type, since, until=None, d_trend_min_mas=6):
         return {"err": str(e)[:80]}
 
 
-# ── 打印 ──────────────────────────────────────────────────────────────────
+# ── 格式化 ────────────────────────────────────────────────────────────────
 
 def fmt(v, plus=True):
     if not isinstance(v, (int, float)):
@@ -144,45 +170,46 @@ def fmt(v, plus=True):
     return f"{v:>+7.1f}" if plus else f"{v:>7}"
 
 
-def print_table(period_label, since, until, rows):
+def print_table(period_label, since, until, rows, title=""):
     until_label = until or "2026-06"
-    w = 78
-    print(f"\n  ┌── {period_label}  {since} ~ {until_label} {'─'*(w-len(period_label)-20)}")
-    print(f"  │  {'标的':<13} {'同仓持有%':>9} {'策略%':>7} {'α%':>7} {'T贡献%':>7}  "
-          f"{'核心换手':>6} {'T入场':>5} {'T胜率':>5}")
+    w = 96
+    hdr = f"{period_label}  {since} ~ {until_label}"
+    if title:
+        hdr = f"{title} │ {hdr}"
+    print(f"\n  ┌── {hdr} {'─'*max(0, w-len(hdr)-6)}")
+    print(f"  │  {'标的':<10} {'赛道':<11} {'同仓持有%':>9} {'策略%':>7} {'α%':>7} "
+          f"{'T贡献%':>7}  {'换手':>4} {'T入场':>5} {'T胜率':>5}  波动")
     print(f"  │  {'─'*w}")
 
-    beat_hold = 0
+    beat_hold  = 0
     t_positive = 0
-    valid = 0
+    valid      = 0
+    last_sector = None
 
-    for symbol, stype, res in rows:
-        label = f"{symbol}({'蓝' if stype=='bluechip' else '波'})"
+    for symbol, stype, name, sector, res in rows:
+        if sector != last_sector and last_sector is not None:
+            print(f"  │  {'·'*w}")
+        last_sector = sector
+
+        vol_label = "大" if stype == "large_vol" else "小"
         if res is None or "err" in res:
             err = res["err"] if res else "数据不足"
-            print(f"  │  {label:<13}  {err}")
+            print(f"  │  {name:<10} {sector:<11}  {err}")
             continue
 
-        h  = res["hold%"]
-        s  = res["strategy%"]
-        a  = res["alpha%"]
-        tp = res["t_pnl%"]
-        ct = res["core_turns"]
-        te = res["t_entries"]
-        tw = res["t_winrate"]
+        h  = res["hold%"];  s = res["strategy%"]
+        a  = res["alpha%"]; tp = res["t_pnl%"]
+        ct = res["core_turns"]; te = res["t_entries"]; tw = res["t_winrate"]
 
-        # 颜色标记（ASCII）
-        a_mark  = "▲" if a > 0 else ("▼" if a < 0 else "=")
+        a_mark  = "▲" if a  > 0 else ("▼" if a  < 0 else "=")
         tp_mark = "+" if tp > 0 else ("-" if tp < 0 else "=")
 
-        print(f"  │  {label:<13} {fmt(h)} {fmt(s)} {fmt(a)}{a_mark} {fmt(tp)}{tp_mark}  "
-              f"{ct:>6} {te:>5} {tw:>4.0f}%")
+        print(f"  │  {name:<10} {sector:<11} {fmt(h)} {fmt(s)} {fmt(a)}{a_mark} "
+              f"{fmt(tp)}{tp_mark}  {ct:>4} {te:>5} {tw:>4.0f}%   {vol_label}")
 
         valid += 1
-        if a > 0:
-            beat_hold += 1
-        if tp > 0:
-            t_positive += 1
+        if a > 0:  beat_hold  += 1
+        if tp > 0: t_positive += 1
 
     print(f"  │  {'─'*w}")
     if valid:
@@ -191,91 +218,108 @@ def print_table(period_label, since, until, rows):
 
 
 def main():
-    print("\n正在运行多标的 / 多时间段回测（含持有基准对比）...")
+    print("\n正在运行多标的 / 多时间段回测...")
 
-    all_results = {}
+    # ── 收集全部结果 ─────────────────────────────────────────────────────
+    all_main     = {}
+    all_serenity = {}
+
     for period_label, since, until in PERIODS:
-        rows = []
-        for symbol, stype in SYMBOLS:
+        rows_main = []
+        for symbol, stype, name, sector in SYMBOLS:
             res = run_and_decompose(symbol, stype, since, until)
-            rows.append((symbol, stype, res))
-        all_results[period_label] = (since, until, rows)
+            rows_main.append((symbol, stype, name, sector, res))
+        all_main[period_label] = (since, until, rows_main)
 
-    print(f"\n{'='*86}")
-    print(f"  多标的对比  配置：日线过滤6档 + 2H双根核心入场 + T仓2H MA5出场")
-    print(f"  α% = 策略收益 − 区间持有收益  |  T贡献% = T仓盈亏/初始资金")
-    print(f"  ▲跑赢持有  ▼跑输持有  +T仓正贡献  -T仓负贡献")
-    print(f"  注：韩股/港股VWAP时区用美股近似，数字仅供参考")
-    print(f"{'='*86}")
+        rows_ser = []
+        for symbol, stype, name, sector in SYMBOLS_SERENITY:
+            res = run_and_decompose(symbol, stype, since, until)
+            rows_ser.append((symbol, stype, name, sector, res))
+        all_serenity[period_label] = (since, until, rows_ser)
 
-    for period_label, (since, until, rows) in all_results.items():
-        print_table(period_label, since, until, rows)
+    # ── 表头说明 ────────────────────────────────────────────────────────
+    print(f"\n{'='*100}")
+    print(f"  科技主线 + Serenity 主题  |  日线MA5>10>20>30 + 2H双根入场 + T仓2H MA5出场")
+    print(f"  α% = 策略 − 同仓位持有  |  T贡献% = T盈亏/初始资金  |  波动: 大≥20%振幅>5%, 小<20%")
+    print(f"  大波动：无核心止损（顺势持有）  |  小波动：建仓初期3%止损 + 浮盈归零保护")
+    print(f"{'='*100}")
 
-    # ── 日线过滤档位对比（全期，α% 汇总）─────────────────────────────────
-    print(f"\n  ┌── 日线多头过滤档位对比（全期α% | 越高=主动管理越有价值）{'─'*15}")
-    filter_labels = {
-        3: "MA5>10>20",
-        4: "MA5>10>20>30",
-        5: "MA5>10>20>30>60",
-        6: "MA5>10>20>30>60>250",
-    }
-    print(f"  │  {'标的':<13} {'档位3':>8} {'档位4':>8} {'档位5':>8} {'档位6':>8}")
-    print(f"  │  {'─'*50}")
-    for symbol, stype in SYMBOLS:
-        row_vals = {}
-        for lvl in [3, 4, 5, 6]:
-            res = run_and_decompose(symbol, stype, "2024-07-01", None,
-                                    d_trend_min_mas=lvl)
-            row_vals[lvl] = res.get("alpha%") if res and "err" not in res else None
-        label = f"{symbol}({'蓝' if stype=='bluechip' else '波'})"
-        def fv(v): return f"{v:>+8.1f}" if v is not None else f"{'—':>8}"
-        print(f"  │  {label:<13} {fv(row_vals[3])} {fv(row_vals[4])} {fv(row_vals[5])} {fv(row_vals[6])}")
-    print(f"  └{'─'*55}")
-    print(f"  说明：档位越低=过滤越松=入场越早；正α=主动管理跑赢同仓位持有")
+    # ── 主线科技表 ───────────────────────────────────────────────────────
+    for period_label, (since, until, rows) in all_main.items():
+        print_table(period_label, since, until, rows, title="科技主线")
 
-    # ── 跨期汇总矩阵 ─────────────────────────────────────────────────────
-    print(f"\n  ┌── 跨期超额α%矩阵（策略收益 − 全仓持有收益，正=有价值）{'─'*20}")
-    print(f"  │  {'标的':<13} {'全期α':>8} {'2024H2 α':>9} {'2025+ α':>9}  综合判断")
-    print(f"  │  {'─'*65}")
-
-    for symbol, stype in SYMBOLS:
+    # ── 跨期汇总矩阵（主线） ──────────────────────────────────────────────
+    print(f"\n  ┌── 跨期α%矩阵 · 科技主线 {'─'*60}")
+    print(f"  │  {'标的':<10} {'赛道':<11} {'全期α':>8} {'2024H2α':>9} {'2025+α':>9}  综合  波动")
+    print(f"  │  {'─'*75}")
+    last_sector = None
+    for symbol, stype, name, sector in SYMBOLS:
+        if sector != last_sector and last_sector is not None:
+            print(f"  │  {'·'*75}")
+        last_sector = sector
         vals = {}
-        for pl, (_, _, rows) in all_results.items():
-            for s, _, r in rows:
+        for pl, (_, _, rows) in all_main.items():
+            for s, _, n, sec, r in rows:
                 if s == symbol and r and "err" not in r:
                     vals[pl] = r["alpha%"]
-
-        label = f"{symbol}({'蓝' if stype=='bluechip' else '波'})"
-        af  = vals.get("全期",   None)
-        ah2 = vals.get("2024H2", None)
-        a25 = vals.get("2025+",  None)
-
+        af  = vals.get("全期");  ah2 = vals.get("2024H2"); a25 = vals.get("2025+")
         def verdict(af, ah2, a25):
             valid = [v for v in [af, ah2, a25] if v is not None]
-            if not valid:
-                return "—"
+            if not valid: return "—"
             pos = sum(1 for v in valid if v > 0)
-            if pos == len(valid):
-                return "✓ 全期跑赢"
-            elif pos == 0:
-                return "✗ 全期跑输"
-            elif ah2 is not None and a25 is not None:
-                if ah2 < 0 and a25 > 0:
-                    return "△ 熊市跑输/牛市跑赢"
-                if ah2 > 0 and a25 < 0:
-                    return "△ 熊市跑赢/牛市跑输"
-            return f"△ {pos}/{len(valid)}期跑赢"
-
-        af_s  = f"{af:>+8.1f}" if af  is not None else f"{'—':>8}"
+            if pos == len(valid):   return "✓全期赢"
+            if pos == 0:            return "✗全期输"
+            if ah2 is not None and a25 is not None:
+                if ah2 < 0 and a25 > 0: return "△熊输/牛赢"
+                if ah2 > 0 and a25 < 0: return "△熊赢/牛输"
+            return f"△{pos}/{len(valid)}期赢"
+        vol = "大" if stype == "large_vol" else "小"
+        af_s  = f"{af:>+8.1f}"  if af  is not None else f"{'—':>8}"
         ah2_s = f"{ah2:>+9.1f}" if ah2 is not None else f"{'—':>9}"
         a25_s = f"{a25:>+9.1f}" if a25 is not None else f"{'—':>9}"
+        print(f"  │  {name:<10} {sector:<11} {af_s} {ah2_s} {a25_s}  {verdict(af,ah2,a25):<12} {vol}")
+    print(f"  └{'─'*78}")
 
-        print(f"  │  {label:<13} {af_s} {ah2_s} {a25_s}  {verdict(af, ah2, a25)}")
+    # ── Serenity 主题表 ─────────────────────────────────────────────────
+    print(f"\n{'='*100}")
+    print(f"  Serenity 主题选股  |  不买最显眼主线，往上游/基础设施渗透")
+    print(f"{'='*100}")
+    for period_label, (since, until, rows) in all_serenity.items():
+        print_table(period_label, since, until, rows, title="Serenity")
 
-    print(f"  └{'─'*70}")
+    # ── Serenity 跨期矩阵 ────────────────────────────────────────────────
+    print(f"\n  ┌── 跨期α%矩阵 · Serenity {'─'*62}")
+    print(f"  │  {'标的':<10} {'赛道':<11} {'全期α':>8} {'2024H2α':>9} {'2025+α':>9}  综合  波动")
+    print(f"  │  {'─'*75}")
+    last_sector = None
+    for symbol, stype, name, sector in SYMBOLS_SERENITY:
+        if sector != last_sector and last_sector is not None:
+            print(f"  │  {'·'*75}")
+        last_sector = sector
+        vals = {}
+        for pl, (_, _, rows) in all_serenity.items():
+            for s, _, n, sec, r in rows:
+                if s == symbol and r and "err" not in r:
+                    vals[pl] = r["alpha%"]
+        af  = vals.get("全期");  ah2 = vals.get("2024H2"); a25 = vals.get("2025+")
+        def verdict(af, ah2, a25):
+            valid = [v for v in [af, ah2, a25] if v is not None]
+            if not valid: return "—"
+            pos = sum(1 for v in valid if v > 0)
+            if pos == len(valid):   return "✓全期赢"
+            if pos == 0:            return "✗全期输"
+            if ah2 is not None and a25 is not None:
+                if ah2 < 0 and a25 > 0: return "△熊输/牛赢"
+                if ah2 > 0 and a25 < 0: return "△熊赢/牛输"
+            return f"△{pos}/{len(valid)}期赢"
+        vol = "大" if stype == "large_vol" else "小"
+        af_s  = f"{af:>+8.1f}"  if af  is not None else f"{'—':>8}"
+        ah2_s = f"{ah2:>+9.1f}" if ah2 is not None else f"{'—':>9}"
+        a25_s = f"{a25:>+9.1f}" if a25 is not None else f"{'—':>9}"
+        print(f"  │  {name:<10} {sector:<11} {af_s} {ah2_s} {a25_s}  {verdict(af,ah2,a25):<12} {vol}")
+    print(f"  └{'─'*78}")
     print()
-    print("  【关键问题】α% 为负说明做T的摩擦损耗 > 主动管理收益，策略在该标的上是负贡献。")
-    print("  【T仓意义】T贡献% 为负说明T仓不如不做，应考虑禁用该标的的T交易。")
+    print("  【α>0=策略有价值】 【T贡献>0=做T值得】 【大=顺势持有不止损，小=建仓期保护+浮盈归零】")
 
 
 if __name__ == "__main__":

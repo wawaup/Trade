@@ -11,6 +11,8 @@ from tradebot.models import Candle
 
 
 BINANCE_REST_BASE = "https://api.binance.com"
+# Public market-data mirror – works in regions where api.binance.com returns 451
+BINANCE_DATA_MIRROR = "https://data-api.binance.vision"
 DAY_MS = 86_400_000
 HOUR_MS = 3_600_000
 
@@ -29,11 +31,24 @@ def parse_binance_kline(row: list) -> Candle:
     )
 
 
+def _fetch_url(url: str, timeout: int = 20) -> bytes:
+    """Fetch a URL, falling back to the data-api mirror on HTTP 451."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code != 451:
+            raise
+    # 451 = geo-blocked on api.binance.com; retry with the public data mirror
+    mirror_url = url.replace(BINANCE_REST_BASE, BINANCE_DATA_MIRROR, 1)
+    with urllib.request.urlopen(mirror_url, timeout=timeout) as resp:
+        return resp.read()
+
+
 def fetch_spot_klines(symbol: str, interval: str, limit: int = 500) -> list[Candle]:
     params = urllib.parse.urlencode({"symbol": symbol, "interval": interval, "limit": limit})
     url = f"{BINANCE_REST_BASE}/api/v3/klines?{params}"
-    with urllib.request.urlopen(url, timeout=20) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    data = json.loads(_fetch_url(url, timeout=20).decode("utf-8"))
     return [parse_binance_kline(row) for row in data]
 
 
@@ -58,8 +73,7 @@ def fetch_klines_range(
             "limit": 1000,
         })
         url = f"{BINANCE_REST_BASE}/api/v3/klines?{params}"
-        with urllib.request.urlopen(url, timeout=30) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = json.loads(_fetch_url(url, timeout=30).decode("utf-8"))
         if not data:
             break
         batch = [parse_binance_kline(row) for row in data]

@@ -135,6 +135,43 @@ def add_daily_weekly_trend(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def add_weekly_monthly_trend(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
+    """
+    周K/月K宏观趋势过滤。
+    周线空头：W_MA5 < W_MA10 且 W_MA5 较前周下行
+    月线空头：M_MA3 < M_MA5（月线MA本身已很平滑，无需额外下行判断）
+    均移位1周/1月避免前视偏差。
+    """
+    try:
+        weekly = df[["close"]].resample("W").agg({"close": "last"}).dropna()
+        weekly["w_ma5"]  = weekly["close"].rolling(5,  min_periods=3).mean()
+        weekly["w_ma10"] = weekly["close"].rolling(10, min_periods=6).mean()
+        weekly["w_trend_dn"] = (
+            (weekly["w_ma5"] < weekly["w_ma10"]) &
+            (weekly["w_ma5"] < weekly["w_ma5"].shift(1))
+        )
+        weekly_sig = weekly[["w_trend_dn"]].copy()
+        weekly_sig.index = weekly_sig.index + pd.Timedelta(weeks=1)
+        out["w_trend_dn"] = weekly_sig["w_trend_dn"].reindex(out.index, method="ffill").fillna(False).astype(bool)
+    except Exception:
+        out["w_trend_dn"] = False
+
+    try:
+        monthly = df[["close"]].resample("ME").agg({"close": "last"}).dropna()
+        monthly["m_ma3"] = monthly["close"].rolling(3, min_periods=2).mean()
+        monthly["m_ma5"] = monthly["close"].rolling(5, min_periods=3).mean()
+        monthly["m_trend_dn"] = (
+            monthly["m_ma3"] < monthly["m_ma5"]
+        )
+        monthly_sig = monthly[["m_trend_dn"]].copy()
+        monthly_sig.index = monthly_sig.index + pd.DateOffset(months=1)
+        out["m_trend_dn"] = monthly_sig["m_trend_dn"].reindex(out.index, method="ffill").fillna(False).astype(bool)
+    except Exception:
+        out["m_trend_dn"] = False
+
+    return out
+
+
 def add_2h_indicators(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
     """
     2H级别技术指标，用于核心仓入场信号。
@@ -217,8 +254,9 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["MACD_hist"] = out["MACD_line"] - out["MACD_line"].ewm(span=9, adjust=False).mean()
     out["vol_avg20"] = df["volume"].rolling(20).mean()
     out["vol_ratio"] = df["volume"] / out["vol_avg20"]
-    # 日线宏观趋势（前视安全：移位1天）
+    # 宏观趋势（前视安全：日线移位1天，周线移位1周，月线移位1月）
     out = add_daily_weekly_trend(out, df)
+    out = add_weekly_monthly_trend(out, df)
     # 2H入场信号（前视安全：移位1根2H K线）
     out = add_2h_indicators(out, df)
     return out.dropna(subset=["MA20", "MA50", "KDJ_J"])
@@ -228,53 +266,47 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 @dataclass
 class StrategyConfig:
-    # 股票类型决定量能门槛
-    stock_type:          str   = "bluechip"  # "bluechip" | "volatile"
-    bluechip_vol_mult:   float = 1.2         # 蓝筹：成交量放大 1.2x 即触发
-    volatile_vol_mult:   float = 1.5         # 高波动：需要 1.5x 确认
+    # 波动等级：small_vol（低波动）| large_vol（高波动）
+    # small_vol：NVDA/TSLA/AAPL/MSFT/小米等，周期性回调明显，适合浮盈保护
+    # large_vol：MU/BTC/ETH/韩股等，趋势延伸极强，止损容易被踢出主升浪
+    stock_type:           str   = "small_vol"
+    small_vol_vol_mult:   float = 1.2   # 低波动：成交量放大1.2x即触发
+    large_vol_vol_mult:   float = 1.5   # 高波动：需要1.5x量能确认
     # 共用参数
-    min_atr_pct:         float = 0.003
-    atr_sl_mult:         float = 1.5
-    tp1:                 float = 0.018
-    tp2:                 float = 0.014
-    tp3:                 float = 0.010
-    max_t_layers:        int   = 3
-    vwap_buffer:         float = 0.001
-    commission_pct:      float = 0.001   # T仓单边手续费（买卖各0.1%，合计0.2%/笔）
-    initial_capital:     float = 10_000.0
-    # 仓位比例（占初始资金）
-    # 蓝筹股：核心仓80%，T仓20%；高波动：核心仓70%，T仓20%
-    bluechip_core_pct:   float = 0.80   # 蓝筹股核心仓比例
-    volatile_core_pct:   float = 0.70   # 高波动股核心仓比例
-    t_pct:               float = 0.20   # T仓：每次开仓用 20%
-    # 核心仓入场：需要连续几根合格的2H K线
-    # 第1根：低点触及2H MA10/20/30 且收盘收回
-    # 第2根：收盘继续站在支撑之上
-    core_entry_h2bars:   int   = 2
-    # 日线多头过滤强度：对齐的MA数量
-    # 3=MA5>MA10>MA20  4=+MA30  5=+MA60  6=+MA250（最严格）
-    d_trend_min_mas:     int   = 4
-    # T仓出场：连续几根2H收盘跌破2H MA5 → 卖出
-    t_exit_h2_break:     int   = 2
-    # 核心仓保护止损
-    # 核心仓保护止损开关（默认关闭 = 历史最佳纯持仓策略）
-    enable_core_stop:     bool  = False
-    # 蓝筹专用：高点回撤止损
-    # 组合收益率曾超 core_trail_trigger，且从最高总资产回撤 >= core_trail_stop → 清仓
-    core_trail_trigger:   float = 0.10   # 触发追踪止损的最低组合盈利（10%）
-    core_trail_stop:      float = 0.05   # 蓝筹：从组合峰值回撤5%触发出场
-    # 通用：浮盈回撤止损
-    # 曾经盈利超 core_profit_lock，后又跌回建仓成本 → 清仓，不让盈利变亏损
-    core_profit_lock:     float = 0.03   # 触发浮盈保护所需最低历史盈利（3%）
+    min_atr_pct:          float = 0.003
+    atr_sl_mult:          float = 1.5
+    tp1:                  float = 0.018
+    tp2:                  float = 0.014
+    tp3:                  float = 0.010
+    max_t_layers:         int   = 3
+    vwap_buffer:          float = 0.001
+    commission_pct:       float = 0.001   # T仓单边手续费0.1%
+    initial_capital:      float = 10_000.0
+    # 仓位比例（低波动核心仓80%，高波动核心仓70%）
+    small_vol_core_pct:   float = 0.80
+    large_vol_core_pct:   float = 0.70
+    t_pct:                float = 0.20
+    # 核心仓入场
+    core_entry_h2bars:    int   = 2
+    # 日线多头过滤强度：3=MA5>10>20  4=+30  5=+60  6=+250
+    d_trend_min_mas:      int   = 4
+    # T仓出场：连续几根2H收盘跌破MA5
+    t_exit_h2_break:      int   = 2
+    # small_vol 专属止损（large_vol 不启用：超级趋势股中途震仓会被踢出主升浪）
+    # 1) 浮盈归零保护：曾盈利超 core_profit_lock，后跌回建仓成本 → 清仓
+    # 2) 早期亏损止损：建仓后 core_early_loss_window 根1H bar 内亏损≥core_early_loss → 清仓
+    #    窗口后不再触发，避免牛市正常回调被踢出
+    core_profit_lock:          float = 0.03   # 触发浮盈归零保护所需最低历史盈利
+    core_early_loss:           float = 0.03   # 早期止损阈值（3%）
+    core_early_loss_window:    int   = 20     # 早期止损有效窗口（根1H bar，≈3个交易日）
 
     @property
     def core_pct(self) -> float:
-        """核心仓比例：蓝筹80%，高波动70%"""
-        return self.bluechip_core_pct if self.stock_type == "bluechip" else self.volatile_core_pct
+        return self.small_vol_core_pct if self.stock_type == "small_vol" else self.large_vol_core_pct
 
     @property
     def vol_mult(self) -> float:
-        return self.bluechip_vol_mult if self.stock_type == "bluechip" else self.volatile_vol_mult
+        return self.small_vol_vol_mult if self.stock_type == "small_vol" else self.large_vol_vol_mult
 
 
 # ── 持仓状态 ───────────────────────────────────────────────────────────────
@@ -346,6 +378,7 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
     """
     core_pos           = Position()
     core_h2_count      = 0    # 0=无信号 1=第1根2H触及支撑 2=第2根2H站稳(可建仓)
+    core_hold_bars     = 0    # 建仓后累计1H bar数，用于早期亏损止损窗口
     portfolio_peak     = 0.0  # 核心仓持仓以来最高总资产（整体收益率追踪）
     core_entry_equity  = 0.0  # 建仓时总资产
     prev_t             = None
@@ -413,14 +446,15 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
             else:
                 t_h2_below_cnt = 0
 
-        # 日线空头标志（只有明确下行才禁止建仓）
-        d_trend_dn = bool(bar.get("d_trend_dn", False))
+        # 空头标志：日线 MA5<MA10 且 MA5 下行
+        d_trend_dn   = bool(bar.get("d_trend_dn", False))
+        any_trend_dn = d_trend_dn
+        t_trend_dn   = d_trend_dn
 
         # ══ 核心仓：2H双根信号建仓，建后不动 ════════════════════════════════
-        # 入场门槛：不处于日线空头（d_trend_dn=False）即可等待2H信号
-        # 这允许在趋势初期（MAs尚未全部对齐但明确不下行时）尽早入场
+        # 入场门槛：日线非空头时等待2H信号
         if not core_pos.is_open:
-            if not d_trend_dn:
+            if not any_trend_dn:
                 if is_new_h2:
                     if h2_touch:
                         core_h2_count = 1          # 第1根2H：触及支撑且收盘站上
@@ -437,6 +471,7 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                                                    stop_pct=0.0, layers=1)
                         cash             -= buy_value
                         core_h2_count     = 0
+                        core_hold_bars    = 0
                         core_entry_equity = cash + core_pos.size * close + t_pos.size * close
                         portfolio_peak    = core_entry_equity
                         trades.append(Trade(
@@ -447,33 +482,34 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
             else:
                 core_h2_count = 0   # 日线空头中，重置2H计数
 
-        # ══ 核心仓保护止损检查（整体收益率视角）════════════════════════════════
-        if core_pos.is_open and cfg.enable_core_stop:
-            portfolio_peak = max(portfolio_peak, cur_equity)
-            portfolio_ret  = (portfolio_peak / cfg.initial_capital) - 1
-            peak_drawdown  = (portfolio_peak - cur_equity) / portfolio_peak if portfolio_peak > 0 else 0
-
-            # 蓝筹专用：高点回撤止损（盈利已超10%，且从峰值回撤>=10%）
-            trail_ok = (cfg.stock_type == "bluechip" and
-                        portfolio_ret >= cfg.core_trail_trigger and
-                        peak_drawdown >= cfg.core_trail_stop)
-            # 通用：浮盈回撤止损（曾盈利>=3%，又跌回建仓成本，不让盈利变亏）
-            early_ok = (portfolio_peak >= cfg.initial_capital * (1 + cfg.core_profit_lock) and
-                        cur_equity <= core_entry_equity)
-
-            if trail_ok or early_ok:
-                core_pnl = (close - core_pos.entry_price) / core_pos.entry_price
-                cash    += core_pos.size * close
-                stop_type = "高点回撤" if trail_ok else "浮盈回撤归零"
+        # ══ small_vol 专属止损 ══════════════════════════════════════════════
+        # large_vol 不启用：超级趋势股中途震仓易被踢出主升浪
+        if core_pos.is_open and cfg.stock_type == "small_vol":
+            core_hold_bars += 1
+            core_pnl        = (close - core_pos.entry_price) / core_pos.entry_price
+            portfolio_peak  = max(portfolio_peak, cur_equity)
+            profit_lock_ok  = (portfolio_peak >= cfg.initial_capital * (1 + cfg.core_profit_lock)
+                               and cur_equity <= core_entry_equity)
+            # 早期亏损止损：只在建仓初期（前 early_loss_window 根1H bar）有效
+            # 避免在上升趋势的正常回调中被踢出
+            in_early_window = core_hold_bars <= cfg.core_early_loss_window
+            early_loss_ok   = in_early_window and core_pnl <= -cfg.core_early_loss
+            if profit_lock_ok or early_loss_ok:
+                cash += core_pos.size * close
+                if profit_lock_ok:
+                    stop_reason = (f"浮盈归零 峰值={portfolio_peak/cfg.initial_capital-1:.2%} "
+                                   f"持仓pnl={core_pnl:.2%}")
+                else:
+                    stop_reason = f"早期亏损 建仓{core_hold_bars}bar内 持仓pnl={core_pnl:.2%}"
                 trades.append(Trade(
                     time=t, action="CORE_STOP", price=close, size=core_pos.size,
-                    reason=(f"{stop_type}止损 组合回撤={peak_drawdown:.2%} "
-                            f"组合收益峰值={portfolio_ret:.2%} 持仓pnl={core_pnl:.2%}"),
+                    reason=stop_reason,
                     pnl_pct=core_pnl,
                     equity=cash + t_pos.size * close
                 ))
                 core_pos          = Position()
                 core_h2_count     = 0
+                core_hold_bars    = 0
                 portfolio_peak    = 0.0
                 core_entry_equity = 0.0
 
@@ -552,8 +588,8 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
             continue
 
         # ── T仓入场（空T仓）────────────────────────────────────────────────
-        # 日线下行趋势中禁用T仓入场（避免逆势做多T）
-        if d_trend_dn:
+        # 日线空头禁用T仓入场
+        if t_trend_dn:
             continue
         # 基础条件：1H趋势向上 + 在VWAP上方 + ATR足够
         if trend != "up" or not above_vwap or not atr_ok:

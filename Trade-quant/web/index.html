@@ -65,8 +65,9 @@
                   <span>数据源</span>
                   <select id="reviewDataSource">
                     <option value="Synthetic" selected>Synthetic</option>
+                    <option value="BinanceSpot">Binance bStocks（实时）</option>
                     <option value="CSV">CSV</option>
-                    <option value="Binance">Binance（仅加密货币）</option>
+                    <option value="Binance">Binance（加密货币现货）</option>
                   </select>
                 </label>
                 <label class="field mini">
@@ -301,8 +302,9 @@ order_intent = signal_to_order_intent(
                       <span>Source</span>
                       <select id="dataSourceSelect">
                         <option value="Synthetic" selected>Synthetic demo</option>
+                        <option value="BinanceSpot">Binance bStocks（实时）</option>
                         <option value="CSV">CSV 本地历史数据</option>
-                        <option value="Binance">Binance spot（仅加密货币）</option>
+                        <option value="Binance">Binance spot（加密货币现货）</option>
                       </select>
                     </label>
                     <p id="dataSourceWarning" class="form-message" style="display:none"></p>

@@ -137,6 +137,7 @@ def build_klines_response(
         normalized_source = DataSourceFactory.normalize_source(source)
         daily_bars, intraday_bars = DataSourceFactory.get_source(normalized_source).get_default_candles(
             symbol=symbol,
+            resolution=resolution,
             daily_path=daily_path,
             intraday_path=intraday_path,
         )
@@ -154,7 +155,7 @@ def build_klines_response(
         end_ms = (end_time_s * 1000) if end_time_s is not None else float("inf")
         bars = [c for c in bars if start_ms <= c.open_time <= end_ms]
     elif not use_daily:
-        bars = bars[-180:]
+        bars = bars[-500:]   # show up to 500 bars by default (≈3 weeks @15m, ≈21 days @1h)
 
     candles = []
     vwap = []
