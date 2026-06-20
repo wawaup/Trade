@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from compare_configs import (
-    SYMBOLS, PERIODS, run_and_decompose,
+    SYMBOLS, SYMBOLS_SERENITY, PERIODS, run_and_decompose,
 )
 
 OUT_DIR = Path(__file__).parent
@@ -23,12 +23,22 @@ OUT_DIR = Path(__file__).parent
 def collect_data():
     all_data = {}
     for period_label, since, until in PERIODS:
-        rows = []
-        for symbol, stype in SYMBOLS:
+        rows_main = []
+        for symbol, stype, name, sector in SYMBOLS:
             print(f"  [{period_label}] {symbol} ...", flush=True)
             res = run_and_decompose(symbol, stype, since, until)
-            rows.append({"symbol": symbol, "type": stype, **({} if res is None else res)})
-        all_data[period_label] = {"since": since, "until": until or "2026-06", "rows": rows}
+            rows_main.append({"symbol": symbol, "type": stype, "name": name, "sector": sector,
+                              **({} if res is None else res)})
+        rows_ser = []
+        for symbol, stype, name, sector in SYMBOLS_SERENITY:
+            print(f"  [{period_label}] serenity/{symbol} ...", flush=True)
+            res = run_and_decompose(symbol, stype, since, until)
+            rows_ser.append({"symbol": symbol, "type": stype, "name": name, "sector": sector,
+                             **({} if res is None else res)})
+        all_data[period_label] = {
+            "since": since, "until": until or "2026-06",
+            "rows": rows_main, "rows_serenity": rows_ser,
+        }
     return all_data
 
 
@@ -112,16 +122,19 @@ function alphaCls(v){
 
 // ── 摘要卡片 ────────────────────────────────────────────────
 function renderCards(period){
-  const rows=DATA[period].rows.filter(r=>r['strategy%']!==undefined);
+  const d=DATA[period];
+  const rows=[...(d.rows||[]),...(d.rows_serenity||[])].filter(r=>r['strategy%']!==undefined);
   const avgAlpha=(rows.reduce((s,r)=>s+(r['alpha%']||0),0)/rows.length).toFixed(1);
   const beat=rows.filter(r=>(r['alpha%']||0)>0).length;
+  const profitable=rows.filter(r=>(r['strategy%']||0)>0).length;
   const avgT=(rows.reduce((s,r)=>s+(r['t_pnl%']||0),0)/rows.length).toFixed(1);
   const tPos=rows.filter(r=>(r['t_pnl%']||0)>0).length;
-  const since=DATA[period].since, until=DATA[period].until;
+  const since=d.since, until=d.until;
 
   return `
   <div class="cards">
     <div class="card"><div class="label">时间区间</div><div class="value neu" style="font-size:16px">${since} ~ ${until}</div></div>
+    <div class="card"><div class="label">策略盈利标的</div><div class="value ${profitable>rows.length*0.6?'pos':'neg'}">${profitable} / ${rows.length}</div></div>
     <div class="card"><div class="label">平均超额α</div><div class="value ${cls(avgAlpha)}">${fmt(avgAlpha)}%</div></div>
     <div class="card"><div class="label">跑赢持有标的数</div><div class="value ${beat>rows.length/2?'pos':'neg'}">${beat} / ${rows.length}</div></div>
     <div class="card"><div class="label">T仓平均贡献</div><div class="value ${cls(avgT)}">${fmt(avgT)}%</div></div>
@@ -130,32 +143,60 @@ function renderCards(period){
 }
 
 // ── 对比主表 ────────────────────────────────────────────────
-function renderTable(period){
-  const rows=DATA[period].rows;
+function buildTable(rows){
+  let profitable=0,beat=0,valid=0;
   let html=`
   <div class="tbl-wrap"><table>
   <thead><tr>
-    <th>标的</th>
+    <th>标的</th><th>赛道</th>
     <th title="同仓位被动持有(小波80%/大波70%)">同仓持有%</th><th>策略%</th>
     <th title="策略% - 同仓持有%">超额α%</th><th>T贡献%</th>
-    <th>核心操作</th><th>T入场</th><th>T胜率</th>
+    <th title="持有期间最大回撤">持有回撤%</th><th title="策略净值最大回撤">策略回撤%</th>
+    <th>核心操作</th><th>T入场</th><th>T胜率</th><th>盈利</th><th>波动</th>
   </tr></thead><tbody>`;
   for(const r of rows){
     const err=r.err||r['错误'];
-    if(err){html+=`<tr><td>${r.symbol}</td><td colspan="7" style="color:#8892a4">${err}</td></tr>`;continue;}
+    if(err){html+=`<tr><td>${r.name||r.symbol}</td><td colspan="12" style="color:#8892a4">${err}</td></tr>`;continue;}
     const h=r['hold%'],s=r['strategy%'],a=r['alpha%'],tp=r['t_pnl%'];
+    const hm=r['hold_mdd%'],sm=r['strat_mdd%'];
+    const pnlIcon=s>0?'✅':'❌';
+    const volLabel=r.type==='large_vol'?'<span style="color:#f87171">大</span>':'<span style="color:#60a5fa">小</span>';
+    // 策略回撤比持有回撤小 = 风控有效（绿），反之红
+    const mddCmp=sm!==undefined&&hm!==undefined?(sm>hm?'pos':'neg'):'';
     html+=`<tr>
-      <td>${r.symbol} <span style="color:#8892a4;font-size:11px">${r.type==='large_vol'?'(大)':'(小)'}</span></td>
+      <td>${r.name||r.symbol} <span style="color:#6b7280;font-size:11px">${r.name&&r.name!==r.symbol?'('+r.symbol+')':''}</span></td>
+      <td style="color:#8892a4;font-size:12px">${r.sector||''}</td>
       <td class="${cls(h)}">${fmt(h)}%</td>
       <td class="${cls(s)}">${fmt(s)}%</td>
       <td class="${alphaCls(a)}">${fmt(a)}%</td>
       <td class="${cls(tp)}">${fmt(tp)}%</td>
+      <td class="neg">${hm!==undefined?fmt(hm)+'%':'—'}</td>
+      <td class="${mddCmp}">${sm!==undefined?fmt(sm)+'%':'—'}</td>
       <td>${r.core_turns??'—'}</td>
       <td>${r.t_entries??'—'}</td>
       <td class="${cls((r.t_winrate||0)-50)}">${r.t_winrate!==undefined?r.t_winrate+'%':'—'}</td>
+      <td style="text-align:center">${pnlIcon}</td>
+      <td style="text-align:center">${volLabel}</td>
     </tr>`;
+    valid++;
+    if(s>0) profitable++;
+    if(a>0) beat++;
   }
   html+=`</tbody></table></div>`;
+  html+=`<p style="color:#8892a4;font-size:12px;padding:6px 4px">策略盈利 ${profitable}/${valid} · 跑赢持有 ${beat}/${valid}</p>`;
+  return html;
+}
+function renderTable(period){
+  const d=DATA[period];
+  // 科技主线：去掉 Serenity 里已有的标的（以 Serenity 为准）
+  const serSymbols=new Set((d.rows_serenity||[]).map(r=>r.symbol));
+  const mainRows=(d.rows||[]).filter(r=>!serSymbols.has(r.symbol));
+  let html=`<h2 style="color:#c9d1e0;font-size:15px;padding:16px 4px 8px">科技主线</h2>`;
+  html+=buildTable(mainRows);
+  if((d.rows_serenity||[]).length){
+    html+=`<h2 style="color:#c9d1e0;font-size:15px;padding:24px 4px 8px">Serenity 主题池</h2>`;
+    html+=buildTable(d.rows_serenity);
+  }
   return html;
 }
 
@@ -167,14 +208,21 @@ function destroyCharts(period){
   });
 }
 function renderCharts(period){
-  const rows=DATA[period].rows.filter(r=>r.eq_curve&&r.hold_curve);
+  const d=DATA[period];
+  // 合并去重：Serenity 为准，科技主线去掉 Serenity 已有的
+  const serSymbols=new Set((d.rows_serenity||[]).map(r=>r.symbol));
+  const mainUniq=(d.rows||[]).filter(r=>!serSymbols.has(r.symbol));
+  const allRows=[...mainUniq,...(d.rows_serenity||[])].filter(r=>r.eq_curve&&r.hold_curve);
   const container=document.getElementById('charts_'+period);
   if(!container)return;
   container.innerHTML='<div class="charts-grid">'+
-    rows.map(r=>`<div class="chart-card"><h3>${r.symbol} — 净值对比（策略 vs 持有）</h3><canvas id="c_${period}_${r.symbol}"></canvas></div>`).join('')+
+    allRows.map(r=>{
+      const label=r.name&&r.name!==r.symbol?`${r.name} (${r.symbol})`:`${r.symbol}`;
+      return `<div class="chart-card"><h3>${label} — 净值对比（策略 vs 持有）</h3><canvas id="c_${period}_${r.symbol}"></canvas></div>`;
+    }).join('')+
     '</div>';
 
-  rows.forEach(r=>{
+  allRows.forEach(r=>{
     const id=`c_${period}_${r.symbol}`;
     const ctx=document.getElementById(id);
     if(!ctx)return;
@@ -213,7 +261,7 @@ function renderCharts(period){
 // ── 跨期α对比图 ─────────────────────────────────────────────
 function renderAlphaChart(){
   Chart.register(ChartDataLabels);
-  const symbols=DATA['全期'].rows.map(r=>r.symbol);
+  const labels=DATA['全期'].rows.map(r=>r.name&&r.name!==r.symbol?r.name:r.symbol);
   const periods=['全期','2024H2','2025+'];
   const colors=['#3b82f6','#f59e0b','#34d399'];
   const datasets=periods.map((p,i)=>({
@@ -234,7 +282,7 @@ function renderAlphaChart(){
   if(!ctx)return;
   new Chart(ctx,{
     type:'bar',
-    data:{labels:symbols,datasets},
+    data:{labels:labels,datasets},
     options:{
       responsive:true,
       plugins:{

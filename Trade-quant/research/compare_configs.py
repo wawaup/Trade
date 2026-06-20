@@ -31,7 +31,7 @@ SYMBOLS = [
     ("MRVL",      "small_vol", "MRVL",    "AI芯片&网络"), #  7%
     # HBM 存储
     ("MU",        "large_vol", "MU",      "HBM存储"),     # 30%
-    ("SNDK",      "large_vol", "SNDK",    "SNDK"),        # 22%
+    ("SNDK",      "large_vol", "SNDK",    "HBM存储"),     # 22%
     ("000660.KS", "large_vol", "SK海力士","HBM存储"),     # 20%
     ("005930.KS", "small_vol", "三星",    "HBM存储"),     # 10%
     # 半导体上游
@@ -141,11 +141,22 @@ def run_and_decompose(symbol, stock_type, since, until=None, d_trend_min_mas=4):
         hold_norm  = hold_norm.reindex(common_idx).ffill()
         times = [str(x)[:16] for x in common_idx]
 
+        def max_drawdown(series):
+            peak = series.cummax()
+            dd   = (series - peak) / peak * 100
+            return round(dd.min(), 1)
+
+        strat_mdd = max_drawdown(equity_series.reindex(common_idx).ffill())
+        hold_price = raw["close"].reindex(common_idx).ffill() * cfg.core_pct
+        hold_mdd  = max_drawdown(hold_price)
+
         return {
             "hold%":      round(hold_ret, 1),
             "strategy%":  round(strat_ret, 1),
             "alpha%":     round(alpha, 1),
             "t_pnl%":     round(t_contribution, 1),
+            "hold_mdd%":  hold_mdd,
+            "strat_mdd%": strat_mdd,
             "core_turns": len(core_ops),
             "t_entries":  len(t_buys),
             "t_winrate":  round(t_win, 0),
@@ -172,17 +183,18 @@ def fmt(v, plus=True):
 
 def print_table(period_label, since, until, rows, title=""):
     until_label = until or "2026-06"
-    w = 96
     hdr = f"{period_label}  {since} ~ {until_label}"
     if title:
         hdr = f"{title} │ {hdr}"
+    w = 114
     print(f"\n  ┌── {hdr} {'─'*max(0, w-len(hdr)-6)}")
     print(f"  │  {'标的':<10} {'赛道':<11} {'同仓持有%':>9} {'策略%':>7} {'α%':>7} "
-          f"{'T贡献%':>7}  {'换手':>4} {'T入场':>5} {'T胜率':>5}  波动")
+          f"{'T贡献%':>7}  {'持有回撤%':>9} {'策略回撤%':>9}  {'换手':>4} {'T入场':>5} {'T胜率':>5}  盈利  波动")
     print(f"  │  {'─'*w}")
 
     beat_hold  = 0
     t_positive = 0
+    profitable = 0
     valid      = 0
     last_sector = None
 
@@ -199,21 +211,24 @@ def print_table(period_label, since, until, rows, title=""):
 
         h  = res["hold%"];  s = res["strategy%"]
         a  = res["alpha%"]; tp = res["t_pnl%"]
+        hm = res.get("hold_mdd%", 0); sm = res.get("strat_mdd%", 0)
         ct = res["core_turns"]; te = res["t_entries"]; tw = res["t_winrate"]
 
-        a_mark  = "▲" if a  > 0 else ("▼" if a  < 0 else "=")
-        tp_mark = "+" if tp > 0 else ("-" if tp < 0 else "=")
+        a_mark    = "▲" if a  > 0 else ("▼" if a  < 0 else "=")
+        tp_mark   = "+" if tp > 0 else ("-" if tp < 0 else "=")
+        pnl_mark  = "✅" if s  > 0 else "❌"
 
         print(f"  │  {name:<10} {sector:<11} {fmt(h)} {fmt(s)} {fmt(a)}{a_mark} "
-              f"{fmt(tp)}{tp_mark}  {ct:>4} {te:>5} {tw:>4.0f}%   {vol_label}")
+              f"{fmt(tp)}{tp_mark}  {fmt(hm)} {fmt(sm)}  {ct:>4} {te:>5} {tw:>4.0f}%  {pnl_mark}  {vol_label}")
 
         valid += 1
         if a > 0:  beat_hold  += 1
         if tp > 0: t_positive += 1
+        if s > 0:  profitable += 1
 
     print(f"  │  {'─'*w}")
     if valid:
-        print(f"  │  跑赢持有: {beat_hold}/{valid}  T仓正贡献: {t_positive}/{valid}")
+        print(f"  │  策略盈利: {profitable}/{valid}  跑赢持有: {beat_hold}/{valid}  T仓正贡献: {t_positive}/{valid}")
     print(f"  └{'─'*(w+2)}")
 
 
