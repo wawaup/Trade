@@ -107,7 +107,7 @@ CORE_BUY_ACTIONS  = {"CORE_BUY"}
 CORE_SELL_ACTIONS = {"CORE_EOD", "CORE_STOP"}
 
 
-def run_and_decompose(symbol, stock_type, since, until=None, d_trend_min_mas=4):
+def run_and_decompose(symbol, stock_type, since, until=None, d_trend_min_mas=4, **cfg_kwargs):
     try:
         raw = load_raw(symbol, "1h")
         raw = raw.loc[since:] if since else raw
@@ -117,7 +117,7 @@ def run_and_decompose(symbol, stock_type, since, until=None, d_trend_min_mas=4):
             return None
 
         df  = compute_indicators(raw)
-        cfg = StrategyConfig(stock_type=stock_type, d_trend_min_mas=d_trend_min_mas)
+        cfg = StrategyConfig(stock_type=stock_type, d_trend_min_mas=d_trend_min_mas, **cfg_kwargs)
         hold_ret  = buy_and_hold_return(raw, core_pct=cfg.core_pct)
         trades, equity_series = run_backtest(df, cfg)
 
@@ -171,6 +171,78 @@ def run_and_decompose(symbol, stock_type, since, until=None, d_trend_min_mas=4):
         }
     except Exception as e:
         return {"err": str(e)[:80]}
+
+
+# ── 变体定义 ──────────────────────────────────────────────────────────────
+
+VARIANTS = [
+    ("基准",   {}),
+    ("金字塔", {"core_mode": "auto"}),   # large_vol→pyramid, small_vol→oneshot
+]
+
+
+def run_variant_comparison():
+    """对比两种策略变体：基准 / 智能金字塔（large_vol开金字塔，small_vol不变）"""
+    since, until = "2024-07-01", None
+    all_syms    = list(SYMBOLS) + list(SYMBOLS_SERENITY)
+    pool_labels = ["主"] * len(SYMBOLS) + ["Sr"] * len(SYMBOLS_SERENITY)
+
+    results = {}
+    for (symbol, stype, name, sector), pool in zip(all_syms, pool_labels):
+        print(f"  [变体对比] {symbol} ...", flush=True)
+        entry = {"name": name, "sector": sector, "stype": stype, "pool": pool}
+        for var_name, overrides in VARIANTS:
+            entry[var_name] = run_and_decompose(symbol, stype, since, until, **overrides)
+        results[symbol] = entry
+
+    w = 95
+    print(f"\n  ┌── 变体对比 · 全期  (△=相对基准，正=改善) {'─'*max(0, w - 41)}")
+    print(f"  │  {'标的':<10} {'赛道':<11} {'类型':<8} {'α基准':>8} "
+          f"{'△金字塔':>9}  {'MDD基准':>8} {'△金字塔MDD(+好)':>15}  池")
+    print(f"  │  {'─'*w}")
+
+    last_pool = None
+    n_pyr = n_mdd = valid = 0
+
+    for (symbol, stype, name, sector), pool in zip(all_syms, pool_labels):
+        if pool != last_pool and last_pool is not None:
+            print(f"  │  {'·'*w}")
+        last_pool = pool
+
+        r    = results[symbol]
+        base = r.get("基准")
+        pyr  = r.get("金字塔")
+
+        if not base or "err" in base:
+            print(f"  │  {name:<10} {sector:<11} {stype:<8}  {'—'}")
+            continue
+
+        a_base  = base["alpha%"]
+        d_pyr   = pyr["alpha%"]  - a_base if (pyr  and "err" not in pyr)  else None
+        mdd_b   = base.get("strat_mdd%", 0)
+        mdd_p   = pyr.get("strat_mdd%", 0) if (pyr and "err" not in pyr) else None
+        # MDD 是负数：d_mdd 正 = 金字塔的回撤绝对值更小 = 改善
+        d_mdd   = (mdd_p - mdd_b) if mdd_p is not None else None
+
+        def _s(v, w=8):
+            return f"{v:>+{w}.1f}" if v is not None else f"{'—':>{w}}"
+
+        pyr_mk = "▲" if (d_pyr is not None and d_pyr > 0) else ""
+        mdd_mk = "▲" if (d_mdd is not None and d_mdd > 0) else ""
+
+        print(f"  │  {name:<10} {sector:<11} {stype:<8} {a_base:>+8.1f} "
+              f"{_s(d_pyr)}{pyr_mk}  "
+              f"{mdd_b:>8.1f}% {_s(d_mdd, 13)}{mdd_mk}  {pool}")
+
+        valid += 1
+        if d_pyr is not None and d_pyr > 0: n_pyr += 1
+        if d_mdd is not None and d_mdd > 0: n_mdd += 1
+
+    print(f"  │  {'─'*w}")
+    if valid:
+        print(f"  │  金字塔改善α: {n_pyr}/{valid}  "
+              f"金字塔改善MaxDD: {n_mdd}/{valid}")
+    print(f"  └{'─'*(w + 2)}")
 
 
 # ── 格式化 ────────────────────────────────────────────────────────────────
@@ -335,6 +407,12 @@ def main():
     print(f"  └{'─'*78}")
     print()
     print("  【α>0=策略有价值】 【T贡献>0=做T值得】 【大=顺势持有不止损，小=建仓期保护+浮盈归零】")
+
+    # ── 变体对比 ──────────────────────────────────────────────────────────
+    print(f"\n{'='*100}")
+    print(f"  运行变体对比 (基准 vs ATR-T加仓 vs 金字塔建仓+ATR-T) ...")
+    print(f"{'='*100}")
+    run_variant_comparison()
 
 
 if __name__ == "__main__":

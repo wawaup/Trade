@@ -95,7 +95,9 @@ def add_daily_weekly_trend(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
     日线空头：MA5 < MA10 且 MA5 较前日下行（正常回踩支撑不算空头）
     """
     try:
-        daily = df[["close"]].resample("1D").agg({"close": "last"}).dropna()
+        daily = df[["open", "high", "low", "close"]].resample("1D").agg({
+            "open": "first", "high": "max", "low": "min", "close": "last"
+        }).dropna()
         daily["d_close"] = daily["close"]
         daily["d_ma5"]   = daily["close"].rolling(5,   min_periods=4).mean()
         daily["d_ma10"]  = daily["close"].rolling(10,  min_periods=8).mean()
@@ -110,8 +112,19 @@ def add_daily_weekly_trend(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
             (daily["d_ma5"] < daily["d_ma5"].shift(1))
         )
 
+        # 日线入场信号：低点触及均线且收盘站上（用于 entry_signal="d_ma"）
+        for n in [5, 10, 20]:
+            ma = daily[f"d_ma{n}"]
+            daily[f"d_touch{n}"] = (daily["low"] <= ma) & (daily["close"] > ma)
+            daily[f"d_above{n}"] = daily["close"] > ma
+        daily["d_touch"] = daily["d_touch5"] | daily["d_touch10"] | daily["d_touch20"]
+        # 日线止损信号：收盘跌破日线MA5（用于 d_ma 模式的出场）
+        daily["d_below_ma5"] = daily["close"] < daily["d_ma5"]
+
         sig_cols = ["d_close", "d_ma5", "d_ma10", "d_ma20",
-                    "d_ma30", "d_ma60", "d_ma250", "d_trend_dn"]
+                    "d_ma30", "d_ma60", "d_ma250", "d_trend_dn",
+                    "d_touch", "d_touch5", "d_touch10", "d_touch20",
+                    "d_above5", "d_above10", "d_above20", "d_below_ma5"]
         daily_sig = daily[sig_cols].copy()
         daily_sig.index = daily_sig.index + pd.Timedelta(days=1)
         daily_sig = daily_sig.reindex(out.index, method="ffill")
@@ -124,13 +137,23 @@ def add_daily_weekly_trend(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
         out["d_ma20_col"] = daily_sig["d_ma20"].fillna(out["MA20"])
         out["d_ma50"]     = daily_sig["d_ma60"].fillna(out["MA50"])
         out["d_trend_dn"] = daily_sig["d_trend_dn"].fillna(False).astype(bool)
+        out["d_touch"]      = daily_sig["d_touch"].fillna(False).astype(bool)
+        out["d_below_ma5"]  = daily_sig["d_below_ma5"].fillna(False).astype(bool)
+        for n in [5, 10, 20]:
+            out[f"d_touch{n}"] = daily_sig[f"d_touch{n}"].fillna(False).astype(bool)
+            out[f"d_above{n}"] = daily_sig[f"d_above{n}"].fillna(False).astype(bool)
     except Exception:
         for col in ["d_close", "d_ma5", "d_ma10", "d_ma20",
                     "d_ma30", "d_ma60", "d_ma250"]:
             out[col] = np.nan
-        out["d_trend_dn"] = False
-        out["d_ma20_col"] = out["MA20"]
-        out["d_ma50"]     = out["MA50"]
+        out["d_trend_dn"]  = False
+        out["d_ma20_col"]  = out["MA20"]
+        out["d_ma50"]      = out["MA50"]
+        out["d_touch"]     = False
+        out["d_below_ma5"] = False
+        for n in [5, 10, 20]:
+            out[f"d_touch{n}"] = False
+            out[f"d_above{n}"] = False
 
     return out
 
@@ -150,11 +173,14 @@ def add_weekly_monthly_trend(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFram
             (weekly["w_ma5"] < weekly["w_ma10"]) &
             (weekly["w_ma5"] < weekly["w_ma5"].shift(1))
         )
-        weekly_sig = weekly[["w_trend_dn"]].copy()
+        weekly["w_bull"] = weekly["w_ma5"] > weekly["w_ma10"]
+        weekly_sig = weekly[["w_trend_dn", "w_bull"]].copy()
         weekly_sig.index = weekly_sig.index + pd.Timedelta(weeks=1)
         out["w_trend_dn"] = weekly_sig["w_trend_dn"].reindex(out.index, method="ffill").fillna(False).astype(bool)
+        out["w_bull"]     = weekly_sig["w_bull"].reindex(out.index, method="ffill").fillna(False).astype(bool)
     except Exception:
         out["w_trend_dn"] = False
+        out["w_bull"]     = False
 
     try:
         monthly = df[["close"]].resample("ME").agg({"close": "last"}).dropna()
@@ -177,9 +203,9 @@ def add_2h_indicators(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
     2H级别技术指标，用于核心仓入场信号。
     移位1根2H K线避免前视偏差（上一根完成的2H K线 → 当前决策）。
 
-    入场逻辑：
-      信号根：2H K线低点触及 MA10/MA20/MA30 其中之一，且收盘收回该均线之上
-      确认根：紧接的下一根2H K线收盘继续站在该均线之上
+    入场逻辑（OR 关系，满足其中一根均线即可）：
+      信号根：2H K线低点触及 MA5/MA10/MA20 其中之一，且收盘收回该均线之上
+      确认根：紧接的下一根2H K线收盘继续站在 MA5/MA10/MA20 任一之上
     """
     try:
         df_2h = df[["open", "high", "low", "close", "volume"]].resample("2h").agg({
@@ -190,29 +216,26 @@ def add_2h_indicators(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
         df_2h["h2_ma5"]  = df_2h["close"].rolling(5,  min_periods=4).mean()
         df_2h["h2_ma10"] = df_2h["close"].rolling(10, min_periods=8).mean()
         df_2h["h2_ma20"] = df_2h["close"].rolling(20, min_periods=15).mean()
-        df_2h["h2_ma30"] = df_2h["close"].rolling(30, min_periods=20).mean()
-
-        # 触及支撑后收回：低点 <= MA 且 收盘 > MA
-        for n in [10, 20, 30]:
+        # 各均线独立的触及+收回信号（low 触及该均线，且 close 收盘站上该均线）
+        for n in [5, 10, 20]:
             ma = df_2h[f"h2_ma{n}"]
             df_2h[f"h2_touch{n}"] = (df_2h["low"] <= ma) & (df_2h["close"] > ma)
+            df_2h[f"h2_above{n}"] = df_2h["close"] > ma
 
+        # 综合 touch：三根均线任一满足即可
         df_2h["h2_touch"] = (
-            df_2h["h2_touch10"] | df_2h["h2_touch20"] | df_2h["h2_touch30"]
-        )
-
-        # 收盘在任意支撑之上（第二根确认用）
-        df_2h["h2_above"] = (
-            df_2h["close"].gt(df_2h["h2_ma10"].fillna(0)) |
-            df_2h["close"].gt(df_2h["h2_ma20"].fillna(0)) |
-            df_2h["close"].gt(df_2h["h2_ma30"].fillna(0))
+            df_2h["h2_touch5"] | df_2h["h2_touch10"] | df_2h["h2_touch20"]
         )
 
         # T仓出场：收盘跌破2H MA5
         df_2h["h2_below_ma5"] = df_2h["close"] < df_2h["h2_ma5"].fillna(0)
 
-        sig_cols = ["h2_ma5", "h2_ma10", "h2_ma20", "h2_ma30",
-                    "h2_touch", "h2_above", "h2_below_ma5"]
+        sig_cols = [
+            "h2_ma5", "h2_ma10", "h2_ma20",
+            "h2_touch", "h2_touch5", "h2_touch10", "h2_touch20",
+            "h2_above5", "h2_above10", "h2_above20",
+            "h2_below_ma5",
+        ]
         # 移位1根2H K线：使用上一根已完成的2H K线信号
         sig = df_2h[sig_cols].shift(1)
         sig_ff = sig.reindex(out.index, method="ffill")
@@ -220,20 +243,65 @@ def add_2h_indicators(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
         out["h2_ma5"]       = sig_ff["h2_ma5"].fillna(out["MA5"])
         out["h2_ma10"]      = sig_ff["h2_ma10"].fillna(out["MA10"])
         out["h2_ma20"]      = sig_ff["h2_ma20"].fillna(out["MA20"])
-        out["h2_ma30"]      = sig_ff["h2_ma30"].fillna(out["MA20"])
         out["h2_touch"]     = sig_ff["h2_touch"].fillna(False).astype(bool)
-        out["h2_above"]     = sig_ff["h2_above"].fillna(False).astype(bool)
+        for n in [5, 10, 20]:
+            out[f"h2_touch{n}"] = sig_ff[f"h2_touch{n}"].fillna(False).astype(bool)
+            out[f"h2_above{n}"] = sig_ff[f"h2_above{n}"].fillna(False).astype(bool)
         out["h2_below_ma5"] = sig_ff["h2_below_ma5"].fillna(False).astype(bool)
     except Exception:
         out["h2_touch"]     = False
-        out["h2_above"]     = False
         out["h2_below_ma5"] = False
         out["h2_ma5"]       = out["MA5"]
         out["h2_ma10"]      = out["MA10"]
         out["h2_ma20"]      = out["MA20"]
-        out["h2_ma30"]      = out["MA20"]
+        for n in [5, 10, 20]:
+            out[f"h2_touch{n}"] = False
+            out[f"h2_above{n}"] = False
 
     return out
+
+
+def auto_classify(df: pd.DataFrame) -> str:
+    """
+    根据 IS 窗口数据动态分类股票特征，避免静态标签在行情变化时失效。
+
+    分类规则（基于 1h 数据）：
+      ATR_pct < 0.015           → small_vol   （低波动蓝筹，保守建仓）
+      ATR_pct ≥ 0.015 且趋势强  → large_vol   （高波动趋势，金字塔追涨）
+      ATR_pct ≥ 0.015 且无趋势  → volatile_vol（高波动震荡，保守建仓+不加仓）
+    """
+    valid = df.dropna(subset=["ATR_pct", "close"])
+    if len(valid) < 20:
+        return "small_vol"
+    atr_pct = float(valid["ATR_pct"].mean())
+    if atr_pct < 0.010:
+        return "small_vol"
+    # 趋势强度：收盘价与时间序列的 Pearson 相关系数（绝对值）
+    n = len(valid)
+    closes = valid["close"].values.astype(float)
+    t_idx  = np.arange(n, dtype=float)
+    t_mean, c_mean = t_idx.mean(), closes.mean()
+    cov = ((t_idx - t_mean) * (closes - c_mean)).mean()
+    t_std = t_idx.std()
+    c_std = closes.std()
+    if t_std < 1e-9 or c_std < 1e-9:
+        return "volatile_vol"
+    trend_corr = abs(cov / (t_std * c_std))
+    return "large_vol" if trend_corr >= 0.5 else "volatile_vol"
+
+
+def compute_grid(df_is: pd.DataFrame) -> tuple:
+    """
+    从 IS 窗口计算 volatile_vol 网格上下轨（布林带思路）。
+    用 IS 期日线收盘的均值 ± 2σ 作为上下轨，代表震荡正常波动范围。
+    返回 (grid_upper, grid_lower)，若数据不足则返回 (0.0, 0.0)。
+    """
+    daily_close = df_is["close"].resample("1D").last().dropna()
+    if len(daily_close) < 20:
+        return 0.0, 0.0
+    mu    = float(daily_close.mean())
+    sigma = float(daily_close.std())
+    return mu + 2 * sigma, mu - 2 * sigma
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -282,16 +350,17 @@ class StrategyConfig:
     vwap_buffer:          float = 0.001
     commission_pct:       float = 0.001   # T仓单边手续费0.1%
     initial_capital:      float = 10_000.0
-    # 仓位比例（低波动核心仓80%，高波动核心仓70%）
-    small_vol_core_pct:   float = 0.80
-    large_vol_core_pct:   float = 0.70
+    core_pct_val:         float = 0.70    # 核心仓统一 70%（三种类型一致）
     t_pct:                float = 0.20
     # 核心仓入场
     core_entry_h2bars:    int   = 2
     # 日线多头过滤强度：3=MA5>10>20  4=+30  5=+60  6=+250
     d_trend_min_mas:      int   = 4
-    # T仓出场：连续几根2H收盘跌破MA5
+    # T仓出场：连续几根2H收盘跌破MA5（2H模式用）
     t_exit_h2_break:      int   = 2
+    # 日线T仓参数（d_ma 模式用）
+    t_d_tp:               float = 0.04   # 止盈目标 4%
+    t_d_days:             int   = 3      # 最大持仓天数
     # small_vol 专属止损（large_vol 不启用：超级趋势股中途震仓会被踢出主升浪）
     # 1) 浮盈归零保护：曾盈利超 core_profit_lock，后跌回建仓成本 → 清仓
     # 2) 早期亏损止损：建仓后 core_early_loss_window 根1H bar 内亏损≥core_early_loss → 清仓
@@ -299,24 +368,56 @@ class StrategyConfig:
     core_profit_lock:          float = 0.03   # 触发浮盈归零保护所需最低历史盈利
     core_early_loss:           float = 0.03   # 早期止损阈值（3%）
     core_early_loss_window:    int   = 20     # 早期止损有效窗口（根1H bar，≈3个交易日）
+    # ── 变体实验参数 ──────────────────────────────────────────────────────────
+    # T仓加仓间距
+    t_add_mode:       str   = "fixed"   # "fixed"=固定0~1%浮盈窗口 | "atr"=0~N×ATR
+    t_add_atr_mult:   float = 0.5       # ATR模式下：加仓窗口上限 = N×ATR
+    # 核心仓金字塔建仓
+    core_mode:        str   = "oneshot"  # "oneshot"=一次建满 | "pyramid"=三层递减 | "auto"=large_vol→pyramid, small_vol→oneshot
+    core_l1_frac:     float = 0.55       # L1占core_pct的比例（最大，首次入场）
+    core_l2_frac:     float = 0.30       # L2占core_pct的比例
+    core_l3_frac:     float = 0.15       # L3占core_pct的比例（三者之和应≈1.0）
+    core_pyramid_atr: float = 1.0        # 相邻层价格间距 = N×ATR
+    # volatile_vol 专属网格参数（由 IS 窗口日线高低点均值决定）
+    grid_upper:       float = 0.0        # 网格上檐（IS日线高点均值）
+    grid_lower:       float = 0.0        # 网格下檐（IS日线低点均值）
+    grid_band:        float = 0.05       # 靠近上/下檐触发范围（5%）
+    grid_cooldown_bars: int = 20         # 止损后冷却期（1H bar数，约20小时）
+    # 入场信号模式
+    # "h2_ma"     : 2H MA触及+双根确认（当前策略）
+    # "kdj_macd"  : KDJ超卖金叉 + MACD柱收敛/金叉（反转捕捉）
+    # "swing_low" : 摆动低点：下影长+量能异常，随后连续收涨
+    # "daily_ma"  : 日线MA支撑反弹（日线MA20/MA50触及收回）
+    entry_signal: str = "h2_ma"
+
+    @property
+    def effective_core_mode(self) -> str:
+        """auto 模式：large_vol 用金字塔，small_vol 保持一次建满"""
+        if self.core_mode == "auto":
+            return "pyramid" if self.stock_type == "large_vol" else "oneshot"
+        return self.core_mode
 
     @property
     def core_pct(self) -> float:
-        return self.small_vol_core_pct if self.stock_type == "small_vol" else self.large_vol_core_pct
+        return self.core_pct_val   # 三种类型统一 70%
 
     @property
     def vol_mult(self) -> float:
-        return self.small_vol_vol_mult if self.stock_type == "small_vol" else self.large_vol_vol_mult
+        if self.stock_type == "small_vol":
+            return self.small_vol_vol_mult
+        return self.large_vol_vol_mult   # large_vol 和 volatile_vol 均用高量能门槛
 
 
 # ── 持仓状态 ───────────────────────────────────────────────────────────────
 
 @dataclass
 class Position:
-    size:        float = 0.0
-    entry_price: float = 0.0
-    stop_pct:    float = 0.0
-    layers:      int   = 0
+    size:             float = 0.0
+    entry_price:      float = 0.0
+    stop_pct:         float = 0.0
+    layers:           int   = 0
+    prev_layer_price: float = 0.0   # 金字塔：上一层入场价（跌破→止损）
+    pyramid_target:   float = 0.0   # 金字塔：下一层触发价
 
     @property
     def is_open(self) -> bool:
@@ -378,14 +479,31 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
     """
     core_pos           = Position()
     core_h2_count      = 0    # 0=无信号 1=第1根2H触及支撑 2=第2根2H站稳(可建仓)
+    core_h2_ma5        = False  # K线1 触发时，是否踩了 MA5
+    core_h2_ma10       = False  # K线1 触发时，是否踩了 MA10
+    core_h2_ma20       = False  # K线1 触发时，是否踩了 MA20
     core_hold_bars     = 0    # 建仓后累计1H bar数，用于早期亏损止损窗口
+    core_entry_bar     = -1   # 建仓时的 bar index，防止同 bar 即止损
     portfolio_peak     = 0.0  # 核心仓持仓以来最高总资产（整体收益率追踪）
     core_entry_equity  = 0.0  # 建仓时总资产
     prev_t             = None
 
-    t_pos          = Position()
-    t_h2_below_cnt = 0   # 连续2H收盘在 h2_ma5 下方的计数（T出场信号）
-    cash           = cfg.initial_capital
+    t_pos           = Position()
+    t_h2_below_cnt  = 0   # 连续2H收盘在 h2_ma5 下方的计数（T出场信号）
+    t_grid_cooldown = 0   # volatile_vol止损后冷却期（剩余bar数）
+    t_day_count     = 0   # 日线T仓持仓天数（d_ma 模式用）
+    # kdj_macd 模式状态
+    kdj_os_cnt      = 0   # 距上次 J<25 的计数（0=无；1~15=近期超卖）
+    # swing_low 模式状态
+    swing_cnt       = 0   # 底部确认后连续收涨计数
+    swing_ref_low   = 0.0 # 摆动低点价格
+    # d_ma 模式状态（日线 2 天确认）
+    d_sig_count     = 0   # 0=无信号 1=日线K1触及 2=日线K2确认(可建仓)
+    d_sig_ma5       = False
+    d_sig_ma10      = False
+    d_sig_ma20      = False
+    d_cut_episode   = False  # 本轮跌破MA5已减仓50%，等价格回到MA5上方才重置
+    cash            = cfg.initial_capital
     trades: list[Trade] = []
     equity         = []
 
@@ -399,7 +517,8 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
         equity.append(cur_equity)
 
         # 2H边界检测（在任何 continue 前更新 prev_t）
-        is_new_h2 = (prev_t is None) or (t.floor("2h") != prev_t.floor("2h"))
+        is_new_h2  = (prev_t is None) or (t.floor("2h") != prev_t.floor("2h"))
+        is_new_day = (prev_t is None) or (t.floor("1D") != prev_t.floor("1D"))
         prev_t = t
 
         if pd.isna(bar["KDJ_J"]) or pd.isna(bar["VWAP"]):
@@ -425,8 +544,26 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
 
         # 2H 信号（已 shift(1) 防前视）
         h2_touch     = bool(bar.get("h2_touch",     False))
-        h2_above     = bool(bar.get("h2_above",     False))
+        h2_touch5    = bool(bar.get("h2_touch5",    False))
+        h2_touch10   = bool(bar.get("h2_touch10",   False))
+        h2_touch20   = bool(bar.get("h2_touch20",   False))
+        h2_above5    = bool(bar.get("h2_above5",    False))
+        h2_above10   = bool(bar.get("h2_above10",   False))
+        h2_above20   = bool(bar.get("h2_above20",   False))
         h2_below_ma5 = bool(bar.get("h2_below_ma5", False))
+
+        # 2H MA 数值（用于 volatile_vol 买卖条件）
+        h2_ma5_val   = bar.get("h2_ma5",  np.nan)
+        h2_ma10_val  = bar.get("h2_ma10", np.nan)
+        h2_ma5_prev  = prev.get("h2_ma5", np.nan)
+        ma5_gt_ma10  = (not pd.isna(h2_ma5_val) and not pd.isna(h2_ma10_val)
+                        and h2_ma5_val > h2_ma10_val)
+        h2_ma5_fall  = (not pd.isna(h2_ma5_val) and not pd.isna(h2_ma5_prev)
+                        and h2_ma5_val < h2_ma5_prev)
+
+        # 冷却期倒计
+        if t_grid_cooldown > 0:
+            t_grid_cooldown -= 1
 
         vol_spike = vol_r > cfg.vol_mult
         macd_pos  = (macd_l > 0) and (macd_h > 0)          # MACD 均在零轴上
@@ -448,39 +585,220 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
 
         # 空头标志：日线 MA5<MA10 且 MA5 下行
         d_trend_dn   = bool(bar.get("d_trend_dn", False))
+        w_bull       = bool(bar.get("w_bull",     False))
         any_trend_dn = d_trend_dn
         t_trend_dn   = d_trend_dn
 
-        # ══ 核心仓：2H双根信号建仓，建后不动 ════════════════════════════════
-        # 入场门槛：日线非空头时等待2H信号
-        if not core_pos.is_open:
-            if not any_trend_dn:
-                if is_new_h2:
-                    if h2_touch:
-                        core_h2_count = 1          # 第1根2H：触及支撑且收盘站上
-                    elif core_h2_count == 1 and h2_above:
-                        core_h2_count = 2          # 第2根2H：站稳 → 可建仓
-                    else:
-                        core_h2_count = 0
+        # 日线触及/止损信号（已 forward-fill 到1H index，shift+1天防前视）
+        d_touch      = bool(bar.get("d_touch",     False))
+        d_touch5     = bool(bar.get("d_touch5",    False))
+        d_touch10    = bool(bar.get("d_touch10",   False))
+        d_touch20    = bool(bar.get("d_touch20",   False))
+        d_above5     = bool(bar.get("d_above5",    False))
+        d_above10    = bool(bar.get("d_above10",   False))
+        d_above20    = bool(bar.get("d_above20",   False))
+        d_below_ma5  = bool(bar.get("d_below_ma5", False))
 
-                if core_h2_count >= cfg.core_entry_h2bars and above_vwap:
+        # ══ 核心仓：2H双根信号建仓，建后不动 ════════════════════════════════
+        # ══ 核心仓入场（按 entry_signal 分支）══════════════════════════════════
+        if not core_pos.is_open:
+            entry_triggered = False
+            entry_reason    = ""
+
+            # ── h2_ma：2H MA触及+双根确认（当前基准策略）──────────────────
+            if cfg.entry_signal == "h2_ma":
+                if not any_trend_dn:
+                    if is_new_h2:
+                        if h2_touch:
+                            core_h2_count = 1
+                            core_h2_ma5  = h2_touch5
+                            core_h2_ma10 = h2_touch10
+                            core_h2_ma20 = h2_touch20
+                        elif core_h2_count == 1:
+                            same_ma_ok = (
+                                (core_h2_ma5  and h2_above5)  or
+                                (core_h2_ma10 and h2_above10) or
+                                (core_h2_ma20 and h2_above20)
+                            )
+                            if same_ma_ok:
+                                core_h2_count = 2
+                            else:
+                                core_h2_count = 0
+                                core_h2_ma5 = core_h2_ma10 = core_h2_ma20 = False
+                        else:
+                            core_h2_count = 0
+                            core_h2_ma5 = core_h2_ma10 = core_h2_ma20 = False
+                    if core_h2_count >= cfg.core_entry_h2bars and above_vwap:
+                        entry_triggered = True
+                        entry_reason    = "2H双根同线确认+VWAP"
+                        core_h2_count   = 0
+                        core_h2_ma5 = core_h2_ma10 = core_h2_ma20 = False
+                else:
+                    core_h2_count = 0
+
+            # ── kdj_macd：KDJ超卖金叉 + MACD柱收敛/金叉（碗底反转）──────
+            elif cfg.entry_signal == "kdj_macd":
+                # 追踪近期超卖
+                if j < 25:
+                    kdj_os_cnt = 1
+                elif 0 < kdj_os_cnt < 20:
+                    kdj_os_cnt += 1
+                else:
+                    kdj_os_cnt = 0
+
+                kdj_cross    = (k > d_kdj) and (prev["KDJ_K"] <= prev["KDJ_D"])
+                macd_improve = macd_h > prev["MACD_hist"]           # 柱子在收窄
+                macd_xup     = (macd_h > 0) and (prev["MACD_hist"] <= 0)  # 金叉
+
+                # 软趋势过滤：只在价格跌破日线MA20 8%以上时禁止（不用严格d_trend_dn）
+                d_ma20_v  = bar.get("d_ma20", np.nan)
+                soft_block = (not pd.isna(d_ma20_v)) and (close < d_ma20_v * 0.92)
+
+                if (0 < kdj_os_cnt <= 15 and kdj_cross
+                        and (macd_improve or macd_xup)
+                        and close > vwap * 0.97          # VWAP 允许 3% 以内偏差
+                        and not soft_block):
+                    entry_triggered = True
+                    entry_reason    = (f"KDJ超卖金叉 J_cnt={kdj_os_cnt}"
+                                       f" {'MACD金叉' if macd_xup else 'MACD收敛'}")
+
+            # ── swing_low：摆动低点（下影长+量能，随后连续收涨）───────────
+            elif cfg.entry_signal == "swing_low":
+                lower_wick = min(float(bar["open"]), close) - float(bar["low"])
+                body_size  = abs(float(bar["open"]) - close)
+                wick_big   = (lower_wick > max(body_size * 1.5, atr * 0.3)
+                              if not pd.isna(atr) else lower_wick > body_size * 1.5)
+
+                if wick_big and vol_spike:
+                    # 发现摆动低点特征：重置计数，记录参考价
+                    swing_cnt     = 1
+                    swing_ref_low = close
+                elif swing_cnt > 0:
+                    if close > prev["close"] and close > swing_ref_low:
+                        swing_cnt += 1
+                    else:
+                        swing_cnt     = 0
+                        swing_ref_low = 0.0
+
+                # 底部后连续 3 根收涨 → 确认反转，且不是严重空头
+                d_ma20_v  = bar.get("d_ma20", np.nan)
+                soft_block = (not pd.isna(d_ma20_v)) and (close < d_ma20_v * 0.90)
+                if (swing_cnt >= 3 and close > vwap * 0.97 and not soft_block):
+                    entry_triggered = True
+                    entry_reason    = f"摆动低点反弹 cnt={swing_cnt}"
+                    swing_cnt       = 0
+                    swing_ref_low   = 0.0
+
+            # ── d_ma：日线MA触及+次日确认（2天同MA确认，不受日线空头过滤）─
+            elif cfg.entry_signal == "d_ma" and cfg.stock_type != "volatile_vol":
+                # volatile_vol（震荡股）不做趋势跟踪，由 IS 分类决定跳过入场
+                if is_new_day:
+                    if d_touch:
+                        # 日线 K1：低点触及均线且收盘站上 → 记录触发的MA
+                        d_sig_count = 1
+                        d_sig_ma5   = d_touch5
+                        d_sig_ma10  = d_touch10
+                        d_sig_ma20  = d_touch20
+                    elif d_sig_count == 1:
+                        # 日线 K2：同MA确认收盘仍站上 → 信号成立
+                        same_ma_ok = (
+                            (d_sig_ma5  and d_above5)  or
+                            (d_sig_ma10 and d_above10) or
+                            (d_sig_ma20 and d_above20)
+                        )
+                        if same_ma_ok:
+                            d_sig_count = 2
+                        else:
+                            d_sig_count = 0
+                            d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
+                    else:
+                        d_sig_count = 0
+                        d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
+
+                # 日线 K2 确认后，当日第一根1H bar建仓
+                if d_sig_count == 2:
+                    entry_triggered = True
+                    which = "MA5" if d_sig_ma5 else ("MA10" if d_sig_ma10 else "MA20")
+                    entry_reason    = f"日线{which}触及确认"
+                    d_sig_count = 0
+                    d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
+
+            # ── volatile_vol 网格入场：价格处于下檐附近区间才买 ────────────
+            elif cfg.entry_signal == "d_ma" and cfg.stock_type == "volatile_vol":
+                _grid_buy_lo = cfg.grid_lower * (1 - cfg.grid_band)   # 跌穿则不买
+                _grid_buy_hi = cfg.grid_lower * (1 + cfg.grid_band)   # 上限
+                if (cfg.grid_lower > 0
+                        and _grid_buy_lo <= close <= _grid_buy_hi):
+                    entry_triggered = True
+                    entry_reason = (f"网格下檐买入 lower={cfg.grid_lower:.2f}"
+                                    f" price={close:.2f}")
+
+            # ── daily_ma（旧版，保留兼容）: 已废弃，用 d_ma 代替 ───────────
+            elif cfg.entry_signal == "daily_ma":
+                d_ma20_v = bar.get("d_ma20", np.nan)
+                d_ma60_v = bar.get("d_ma60", np.nan)
+                touch_ma20 = (not pd.isna(d_ma20_v)
+                              and float(bar["low"]) <= d_ma20_v * 1.015
+                              and close > d_ma20_v)
+                touch_ma60 = (not pd.isna(d_ma60_v)
+                              and float(bar["low"]) <= d_ma60_v * 1.015
+                              and close > d_ma60_v)
+                if (touch_ma20 or touch_ma60) and vol_r > 1.0:
+                    entry_triggered = True
+                    entry_reason    = f"日线MA{'20' if touch_ma20 else '60'}支撑反弹 vol={vol_r:.1f}x"
+
+            # ── 执行建仓 ─────────────────────────────────────────────────────
+            if entry_triggered:
+                if cfg.entry_signal == "d_ma":
+                    # d_ma 模式：全仓一次买入，不分层
                     buy_value = cfg.initial_capital * cfg.core_pct
-                    buy_size  = buy_value / close
-                    if cash >= buy_value:
-                        core_pos          = Position(size=buy_size, entry_price=close,
-                                                   stop_pct=0.0, layers=1)
-                        cash             -= buy_value
-                        core_h2_count     = 0
-                        core_hold_bars    = 0
-                        core_entry_equity = cash + core_pos.size * close + t_pos.size * close
-                        portfolio_peak    = core_entry_equity
-                        trades.append(Trade(
-                            time=t, action="CORE_BUY", price=close, size=buy_size,
-                            reason="2H双根确认+VWAP(非日线空头)",
-                            equity=cash + core_pos.size * close
-                        ))
-            else:
-                core_h2_count = 0   # 日线空头中，重置2H计数
+                    nxt_tgt   = 0.0
+                elif cfg.effective_core_mode == "pyramid":
+                    buy_value = cfg.initial_capital * cfg.core_pct * cfg.core_l1_frac
+                    nxt_tgt   = close * (1 + cfg.core_pyramid_atr * max(atr, 0.01))
+                else:
+                    buy_value = cfg.initial_capital * cfg.core_pct
+                    nxt_tgt   = 0.0
+                buy_size = buy_value / close
+                if cash >= buy_value:
+                    core_pos  = Position(size=buy_size, entry_price=close, stop_pct=0.0,
+                                         layers=1, prev_layer_price=0.0, pyramid_target=nxt_tgt)
+                    cash             -= buy_value
+                    core_hold_bars    = 0
+                    core_entry_bar    = i
+                    d_cut_episode     = False
+                    core_entry_equity = cash + core_pos.size * close + t_pos.size * close
+                    portfolio_peak    = core_entry_equity
+                    trades.append(Trade(
+                        time=t, action="CORE_BUY", price=close, size=buy_size,
+                        reason=entry_reason, equity=cash + core_pos.size * close
+                    ))
+
+        # ══ 金字塔核心仓：追加后续层（d_ma 模式不加仓）══════════════════════
+        if (core_pos.is_open and cfg.entry_signal != "d_ma"
+                and cfg.effective_core_mode == "pyramid"
+                and core_pos.layers < 3 and close >= core_pos.pyramid_target
+                and not any_trend_dn):
+            add_frac  = cfg.core_l2_frac if core_pos.layers == 1 else cfg.core_l3_frac
+            next_tgt  = (close * (1 + cfg.core_pyramid_atr * max(atr, 0.01))
+                         if core_pos.layers == 1 else float("inf"))
+            add_value = cfg.initial_capital * cfg.core_pct * add_frac
+            add_size  = add_value / close
+            if cash >= add_value:
+                prev_entry            = core_pos.entry_price
+                total_cost            = core_pos.entry_price * core_pos.size + close * add_size
+                core_pos.size        += add_size
+                core_pos.entry_price  = total_cost / core_pos.size
+                core_pos.layers      += 1
+                core_pos.prev_layer_price = prev_entry
+                core_pos.pyramid_target   = next_tgt
+                cash                 -= add_value
+                trades.append(Trade(
+                    time=t, action="CORE_ADD", price=close, size=add_size,
+                    reason=f"金字塔L{core_pos.layers} 间距{cfg.core_pyramid_atr:.1f}×ATR",
+                    layers=core_pos.layers,
+                    equity=cash + core_pos.size * close + t_pos.size * close,
+                ))
 
         # ══ small_vol 专属止损 ══════════════════════════════════════════════
         # large_vol 不启用：超级趋势股中途震仓易被踢出主升浪
@@ -509,14 +827,188 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 ))
                 core_pos          = Position()
                 core_h2_count     = 0
+                d_sig_count       = 0
+                d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
                 core_hold_bars    = 0
                 portfolio_peak    = 0.0
                 core_entry_equity = 0.0
+                if t_pos.is_open:
+                    t_pnl = (close - t_pos.entry_price) / t_pos.entry_price
+                    cash += t_pos.size * close * (1 - cfg.commission_pct)
+                    trades.append(Trade(
+                        time=t, action="T_STOP", price=close, size=t_pos.size,
+                        reason=f"核心仓止损同步平T pnl={t_pnl:.2%}",
+                        pnl_pct=t_pnl, layers=t_pos.layers,
+                        equity=cash,
+                    ))
+                    t_pos = Position(); t_day_count = 0
+
+        # ══ 金字塔减仓：收盘跌破MA5 → 剥离一层（软止损）══════════════════
+        # d_ma 模式用日线条件（is_new_day + d_below_ma5），其余用 2H 条件
+        _use_daily_stop = (cfg.entry_signal == "d_ma")
+        _stop_trigger   = (
+            (is_new_day and d_below_ma5) if _use_daily_stop
+            else (is_new_h2 and h2_below_ma5)
+        )
+        _stop_label = "日线跌破MA5" if _use_daily_stop else "2H跌破MA5"
+        if (core_pos.is_open and cfg.entry_signal != "d_ma"
+                and cfg.effective_core_mode == "pyramid"
+                and _stop_trigger and i > core_entry_bar):
+            pnl = (close - core_pos.entry_price) / core_pos.entry_price
+            if core_pos.layers > 1:
+                sell_size     = core_pos.size / core_pos.layers   # 剥离最近一层
+                gross         = sell_size * close
+                net           = gross * (1 - cfg.commission_pct)
+                cash         += net
+                core_pos.size -= sell_size
+                core_pos.layers -= 1
+                trades.append(Trade(
+                    time=t, action="CORE_CUT", price=close, size=sell_size,
+                    reason=(f"{_stop_label}减仓 剩余{core_pos.layers}层"
+                            f" pnl={pnl:.2%}"),
+                    pnl_pct=pnl, layers=core_pos.layers,
+                    equity=cash + core_pos.size * close + t_pos.size * close,
+                ))
+            else:
+                # 只剩1层 → 全部清仓
+                gross = core_pos.size * close
+                net   = gross * (1 - cfg.commission_pct)
+                cash += net
+                trades.append(Trade(
+                    time=t, action="CORE_STOP", price=close, size=core_pos.size,
+                    reason=f"{_stop_label}止损(最终层) pnl={pnl:.2%}",
+                    pnl_pct=pnl, equity=cash + t_pos.size * close,
+                ))
+                core_pos          = Position()
+                core_h2_count     = 0
+                d_sig_count       = 0
+                d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
+                core_hold_bars    = 0
+                portfolio_peak    = 0.0
+                core_entry_equity = 0.0
+                if t_pos.is_open:
+                    t_pnl = (close - t_pos.entry_price) / t_pos.entry_price
+                    cash += t_pos.size * close * (1 - cfg.commission_pct)
+                    trades.append(Trade(
+                        time=t, action="T_STOP", price=close, size=t_pos.size,
+                        reason=f"核心仓止损同步平T pnl={t_pnl:.2%}",
+                        pnl_pct=t_pnl, layers=t_pos.layers,
+                        equity=cash,
+                    ))
+                    t_pos = Position(); t_day_count = 0
+
+        # ══ 金字塔止损：跌破上一层入场价（d_ma 模式不适用）══════════════════
+        if (core_pos.is_open and cfg.entry_signal != "d_ma"
+                and cfg.effective_core_mode == "pyramid"
+                and core_pos.layers >= 2 and close < core_pos.prev_layer_price):
+            pnl   = (close - core_pos.entry_price) / core_pos.entry_price
+            cash += core_pos.size * close
+            trades.append(Trade(
+                time=t, action="CORE_STOP", price=close, size=core_pos.size,
+                reason=(f"金字塔止损 跌破L{core_pos.layers - 1}"
+                        f"价{core_pos.prev_layer_price:.2f} pnl={pnl:.2%}"),
+                pnl_pct=pnl, equity=cash + t_pos.size * close,
+            ))
+            core_pos          = Position()
+            core_h2_count     = 0
+            core_hold_bars    = 0
+            portfolio_peak    = 0.0
+            core_entry_equity = 0.0
+            if t_pos.is_open:
+                t_pnl = (close - t_pos.entry_price) / t_pos.entry_price
+                cash += t_pos.size * close * (1 - cfg.commission_pct)
+                trades.append(Trade(
+                    time=t, action="T_STOP", price=close, size=t_pos.size,
+                    reason=f"核心仓止损同步平T pnl={t_pnl:.2%}",
+                    pnl_pct=t_pnl, layers=t_pos.layers, equity=cash,
+                ))
+                t_pos = Position(); t_day_count = 0
+
+        # ══ volatile_vol 网格：靠近上檐止盈，跌穿下檐止损 ══════════════════
+        if (core_pos.is_open and cfg.stock_type == "volatile_vol"
+                and cfg.entry_signal == "d_ma" and cfg.grid_upper > 0
+                and i > core_entry_bar):   # 防同 bar 建仓后即触发出场
+            pnl = (close - core_pos.entry_price) / core_pos.entry_price
+            _grid_exit_reason = None
+            if close >= cfg.grid_upper * (1 - cfg.grid_band):
+                _grid_exit_reason = f"网格上檐止盈 upper={cfg.grid_upper:.2f} pnl={pnl:.2%}"
+            elif close < cfg.grid_lower * (1 - cfg.grid_band):
+                _grid_exit_reason = f"网格跌穿下檐止损 lower={cfg.grid_lower:.2f} pnl={pnl:.2%}"
+            if _grid_exit_reason:
+                net   = core_pos.size * close * (1 - cfg.commission_pct)
+                cash += net
+                trades.append(Trade(
+                    time=t, action="CORE_STOP", price=close, size=core_pos.size,
+                    reason=_grid_exit_reason, pnl_pct=pnl,
+                    equity=cash + t_pos.size * close,
+                ))
+                core_pos          = Position()
+                core_h2_count     = 0
+                d_sig_count       = 0
+                d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
+                core_hold_bars    = 0
+                portfolio_peak    = 0.0
+                core_entry_equity = 0.0
+
+        # ══ d_ma 止损：日线收盘跌破MA5 → 减仓50%（每轮跌破事件只减一次）══
+        if (core_pos.is_open and cfg.entry_signal == "d_ma"
+                and cfg.stock_type != "volatile_vol" and is_new_day):
+            if not d_below_ma5:
+                d_cut_episode = False   # 价格回到MA5上方，重置减仓标记
+            elif not d_cut_episode and i > core_entry_bar:
+                sell_size     = core_pos.size * 0.5
+                pnl           = (close - core_pos.entry_price) / core_pos.entry_price
+                net           = sell_size * close * (1 - cfg.commission_pct)
+                cash         += net
+                core_pos.size -= sell_size
+                d_cut_episode = True
+                trades.append(Trade(
+                    time=t, action="CORE_CUT", price=close, size=sell_size,
+                    reason=f"日线跌破MA5减仓50% pnl={pnl:.2%}",
+                    pnl_pct=pnl,
+                    equity=cash + core_pos.size * close + t_pos.size * close,
+                ))
 
         # ══ T仓管理（核心仓不存在时跳过）══════════════════════════════════
         if not core_pos.is_open:
             continue
 
+        # ── 日线T仓（d_ma 模式）── 暂停，专注核心仓策略优化 ─────────────────
+        if cfg.entry_signal == "d_ma":
+            # T仓逻辑暂时注释，待核心仓策略稳定后启用
+            # if t_pos.is_open:
+            #     t_pnl = (close - t_pos.entry_price) / t_pos.entry_price
+            #     if is_new_day:
+            #         t_day_count += 1
+            #     exit_reason = ""
+            #     exit_action = "T_STOP"
+            #     if is_new_day and d_below_ma5:
+            #         exit_reason = f"日线跌破MA5 pnl={t_pnl:.2%}"
+            #     elif t_pnl >= cfg.t_d_tp:
+            #         exit_reason = f"T止盈{cfg.t_d_tp:.0%} pnl={t_pnl:.2%}"
+            #         exit_action = "T_TP"
+            #     elif is_new_day and t_day_count >= cfg.t_d_days:
+            #         exit_action = "T_TP" if t_pnl >= 0 else "T_STOP"
+            #         exit_reason = f"持仓{t_day_count}日出场 pnl={t_pnl:.2%}"
+            #     if exit_reason:
+            #         gross = t_pos.size * close
+            #         cash += gross * (1 - cfg.commission_pct)
+            #         trades.append(Trade(
+            #             time=t, action=exit_action, price=close, size=t_pos.size,
+            #             reason=exit_reason, pnl_pct=t_pnl, layers=t_pos.layers,
+            #             equity=cash + core_pos.size * close,
+            #         ))
+            #         t_pos = Position(); t_day_count = 0
+            # else:
+            #     _core_pnl = (close - core_pos.entry_price) / core_pos.entry_price
+            #     _dma5_v   = bar.get("d_ma5",  np.nan)
+            #     _dma10_v  = bar.get("d_ma10", np.nan)
+            #     _d_bull   = (not pd.isna(_dma5_v) and not pd.isna(_dma10_v) and _dma5_v > _dma10_v)
+            #     _core_safe = _core_pnl >= -0.02
+            #     if is_new_day and d_touch5 and not t_trend_dn and _d_bull and w_bull and _core_safe:
+            continue  # T仓暂停，跳过入场
+
+        # ── 2H 动量T仓（非 d_ma 模式）────────────────────────────────────
         if t_pos.is_open:
             pnl = (close - t_pos.entry_price) / t_pos.entry_price
 
@@ -533,6 +1025,8 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 ))
                 t_pos = Position()
                 t_h2_below_cnt = 0
+                if cfg.stock_type == "volatile_vol":
+                    t_grid_cooldown = cfg.grid_cooldown_bars
                 continue
 
             # ATR止损保底（单根快速跌破）
@@ -548,9 +1042,11 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 ))
                 t_pos = Position()
                 t_h2_below_cnt = 0
+                if cfg.stock_type == "volatile_vol":
+                    t_grid_cooldown = cfg.grid_cooldown_bars
                 continue
 
-            # T仓止盈
+            # T仓止盈（动量模式）
             tp_targets = [cfg.tp1, cfg.tp2, cfg.tp3]
             tp = tp_targets[min(t_pos.layers - 1, 2)]
             if pnl >= tp:
@@ -567,9 +1063,11 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 t_h2_below_cnt = 0
                 continue
 
-            # T仓加仓（顺势 + 量能 + 浮盈 0-1%）
+            # T仓加仓（顺势 + 量能 + 浮盈 0~N×ATR 或固定0~1%）
+            t_add_upper = (cfg.t_add_atr_mult * atr
+                           if cfg.t_add_mode == "atr" and atr > 0 else 0.01)
             if (t_pos.layers < cfg.max_t_layers and trend == "up"
-                    and vol_spike and 0 < pnl < 0.01 and atr_ok):
+                    and vol_spike and 0 < pnl < t_add_upper and atr_ok):
                 add_value = cfg.initial_capital * 0.05
                 add_size  = add_value / close
                 comm      = add_value * cfg.commission_pct
@@ -587,11 +1085,19 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                     ))
             continue
 
-        # ── T仓入场（空T仓）────────────────────────────────────────────────
-        # 日线空头禁用T仓入场
+        # ── 2H T仓入场（空T仓）────────────────────────────────────────────
         if t_trend_dn:
             continue
-        # 基础条件：1H趋势向上 + 在VWAP上方 + ATR足够
+
+        buy_value = cfg.initial_capital * cfg.t_pct
+        comm      = buy_value * cfg.commission_pct
+        buy_size  = buy_value / close
+        if cash < buy_value + comm:
+            continue
+
+        if cfg.stock_type == "volatile_vol":
+            continue   # 震荡股暂不做T，跳过动量T逻辑
+
         if trend != "up" or not above_vwap or not atr_ok:
             continue
 
@@ -605,16 +1111,10 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
         else:
             continue
 
-        buy_value = cfg.initial_capital * cfg.t_pct
-        comm      = buy_value * cfg.commission_pct
-        buy_size  = buy_value / close
-        if cash < buy_value + comm:
-            continue
-
         stop_pct = atr * cfg.atr_sl_mult if not pd.isna(atr) else 0.035
         t_pos     = Position(size=buy_size, entry_price=close,
                              stop_pct=stop_pct, layers=1)
-        cash     -= buy_value + comm      # 买入价 + 手续费
+        cash     -= buy_value + comm
         t_h2_below_cnt = 0
         trades.append(Trade(
             time=t, action="T_BUY", price=close, size=buy_size,
