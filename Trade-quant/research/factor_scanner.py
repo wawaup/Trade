@@ -245,6 +245,37 @@ def ic_stats(ic_series):
     return dict(IC_mean=mean, IC_std=std, ICIR=icir, t_stat=t_stat, n_days=n)
 
 
+# ── 宏观状态开关 ──────────────────────────────────────────────────────────────
+
+def compute_spy_regime(spy_close, ma_window=200, buffer=0.01):
+    """
+    基于 SPY 收盘价 vs MA{ma_window} 确定宏观市场状态。
+
+    buffer=1%：均线±1% 内视为中性，避免均线附近频繁切换。
+    返回 Series:  1 = 牛市（SPY > MA × 1.01）
+                 -1 = 熊市（SPY < MA × 0.99）
+                  0 = 中性过渡区
+    """
+    ma = spy_close.rolling(ma_window).mean()
+    regime = pd.Series(0, index=spy_close.index, name="regime")
+    regime[spy_close > ma * (1 + buffer)] = 1
+    regime[spy_close < ma * (1 - buffer)] = -1
+    return regime, ma
+
+
+def compute_conditional_ic(ic_series_all, factor_names, spy_regime, horizon=5):
+    """按宏观状态（牛市/熊市）分别计算 IC 统计，用于制定因子权重开关策略。"""
+    bull_dates = spy_regime[spy_regime == 1].index
+    bear_dates = spy_regime[spy_regime == -1].index
+    cond_results = {}
+    for fname in factor_names:
+        ic = ic_series_all.get((fname, horizon), pd.Series(dtype=float))
+        for label, dates in [("牛市", bull_dates), ("熊市", bear_dates)]:
+            subset = ic[ic.index.isin(dates)].dropna()
+            cond_results[(fname, label)] = ic_stats(subset)
+    return cond_results, len(bull_dates), len(bear_dates)
+
+
 # ── 主扫描 ────────────────────────────────────────────────────────────────────
 
 def run_scan(factors, fwd_returns, liquid_mask, min_stocks=MIN_STOCKS):
@@ -470,6 +501,8 @@ def generate_html_report(
     results, ic_series_all, regime_stats, yearly_stats, years,
     factor_names, since, n_stocks, liquid_pct,
     heatmap_path, series_path, out_path,
+    cond_ic=None, n_bull=0, n_bear=0,
+    spy_last=None, ma200_last=None, current_regime=0,
 ):
     heatmap_b64 = _img_b64(heatmap_path)
     series_b64  = _img_b64(series_path)
@@ -673,6 +706,69 @@ def generate_html_report(
     </div>
     """
 
+    # ── 宏观状态开关：条件 IC 表 + 当前状态 ─────────────────────────────────
+    def regime_switch_section():
+        if cond_ic is None:
+            return ""
+        regime_label = {1: "🟢 牛市", -1: "🔴 熊市", 0: "🟡 中性过渡"}.get(current_regime, "未知")
+        spy_vs_ma = ((spy_last / ma200_last - 1) * 100) if ma200_last else 0
+        vs_str    = f"{spy_vs_ma:+.1f}%"
+        badge_clr = "#39d353" if current_regime == 1 else ("#f85149" if current_regime == -1 else "#ffd60a")
+
+        # 推荐权重逻辑（简单启发式）
+        def recommend(fname, bull_ic, bear_ic):
+            if current_regime == 1:
+                ic = bull_ic
+            elif current_regime == -1:
+                ic = bear_ic
+            else:
+                ic = (bull_ic + bear_ic) / 2 if not (np.isnan(bull_ic) or np.isnan(bear_ic)) else np.nan
+            if np.isnan(ic) or abs(ic) < 0.015:
+                return '<span style="color:#666">暂不使用</span>'
+            return ('<span style="color:#39d353">↑ 正向加权</span>' if ic > 0
+                    else '<span style="color:#f85149">↓ 反向加权</span>')
+
+        rows = ""
+        for fname in factor_names:
+            bs = cond_ic.get((fname, "牛市"), {})
+            br = cond_ic.get((fname, "熊市"), {})
+            bull_ic = bs.get("IC_mean", np.nan)
+            bear_ic = br.get("IC_mean", np.nan)
+            bull_ir = bs.get("ICIR", np.nan)
+            bear_ir = br.get("ICIR", np.nan)
+            rec     = recommend(fname, bull_ic, bear_ic)
+            rows += (
+                f'<tr>'
+                f'<td class="fn">{fname}</td>'
+                f'<td style="background:{_ic_color(bull_ic,bull_ir)}">{_ic_text(bull_ic,bull_ir)}</td>'
+                f'<td style="background:{_ic_color(bear_ic,bear_ir)}">{_ic_text(bear_ic,bear_ir)}</td>'
+                f'<td>{rec}</td>'
+                f'</tr>'
+            )
+
+        return f"""
+  <h2>6. 宏观状态开关分析（SPY MA200 信号）</h2>
+  <div class="note">
+    <b>当前市场状态：</b>
+    <span style="background:{badge_clr};color:#000;padding:2px 10px;border-radius:12px;
+                 font-weight:700;font-size:1em">{regime_label}</span>
+    &nbsp;&nbsp;SPY {spy_last:.2f} vs MA200 {ma200_last:.2f}（偏离 {vs_str}）<br><br>
+    <b>信号逻辑：</b>SPY 收盘价 &gt; MA200×1.01 = 牛市，&lt; MA200×0.99 = 熊市，±1% 缓冲区避免频繁切换。<br>
+    <b>使用方式：</b>牛市时对正向因子加权；熊市时切换至反转因子（BIAS_20 反向）或现金观望。
+  </div>
+  <p class="sub">牛市样本 {n_bull} 天 · 熊市样本 {n_bear} 天（基于 SPY MA200 信号）</p>
+  <table>
+    <thead>
+      <tr>
+        <th>因子</th>
+        <th>牛市 IC<br><span style="font-weight:400;font-size:0.85em">(SPY &gt; MA200)</span></th>
+        <th>熊市 IC<br><span style="font-weight:400;font-size:0.85em">(SPY &lt; MA200)</span></th>
+        <th>当前建议</th>
+      </tr>
+    </thead>
+    <tbody>{rows}</tbody>
+  </table>"""
+
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -719,6 +815,8 @@ def generate_html_report(
   <h2>5. IC 时序图（各因子·持仓5天·含市场分期背景）</h2>
   <p class="sub">柱状图 = 每日IC；深色折线 = 累计IC（斜率向上=因子持续有效）；背景色 = 市场分期</p>
   <img src="data:image/png;base64,{series_b64}" alt="IC时序图">
+
+  {regime_switch_section()}
 </div></div>
 
 </body>
@@ -789,6 +887,7 @@ def main():
           f"{close.index[0].date()} ~ {close.index[-1].date()}")
 
     qqq_close = load_benchmark("QQQ", args.tf, since=args.since).reindex(close.index)
+    spy_close = load_benchmark("SPY", args.tf, since=args.since).reindex(close.index)
 
     liquid = build_liquidity_mask(close, vol)
     liquid_pct = liquid.stack().mean() * 100
@@ -806,6 +905,15 @@ def main():
     # 分环境 & 分年度
     regime_stats = compute_regime_stats(ic_series_all, factor_names)
     yearly_stats, years = compute_yearly_stats(ic_series_all, factor_names, horizon=5)
+
+    # 宏观状态开关
+    spy_regime, spy_ma200 = compute_spy_regime(spy_close)
+    cond_ic, n_bull, n_bear = compute_conditional_ic(
+        ic_series_all, factor_names, spy_regime, horizon=5
+    )
+    spy_last   = spy_close.dropna().iloc[-1]
+    ma200_last = spy_ma200.dropna().iloc[-1]
+    current_regime = spy_regime.dropna().iloc[-1]
 
     print_summary(results, factor_names, yearly_stats, years, regime_stats)
 
@@ -826,6 +934,8 @@ def main():
         results, ic_series_all, regime_stats, yearly_stats, years,
         factor_names, args.since, close.shape[1], liquid_pct,
         heatmap_path, series_path, html_path,
+        cond_ic=cond_ic, n_bull=n_bull, n_bear=n_bear,
+        spy_last=spy_last, ma200_last=ma200_last, current_regime=int(current_regime),
     )
 
     print(f"\n全部输出已保存至 {DATA_DIR}/")
