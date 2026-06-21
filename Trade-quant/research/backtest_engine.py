@@ -961,10 +961,12 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                             reason=entry_reason,
                             equity=cash + core_pos.size * close,
                         ))
-                        # adx_atr 模式：建仓时初始化止损状态
-                        if cfg.entry_signal == "adx_atr":
-                            adx_entry_mode = "range" if "网格" in entry_reason else "trend"
-                            if adx_entry_mode == "trend" and not pd.isna(d_atr_abs) and d_atr_abs > 0:
+                        # d_ma / adx_atr 模式：趋势入场时初始化ATR吊灯追踪止损
+                        # 网格入场（entry_reason含"网格"）不使用ATR止损，走网格上下轨出场
+                        if cfg.entry_signal in ("d_ma", "adx_atr"):
+                            _is_grid_entry = "网格" in entry_reason
+                            adx_entry_mode = "range" if _is_grid_entry else "trend"
+                            if not _is_grid_entry and not pd.isna(d_atr_abs) and d_atr_abs > 0:
                                 atr_trail_sl     = close - cfg.atr_trail_mult * d_atr_abs
                                 atr_highest_high = close
 
@@ -1144,8 +1146,9 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 portfolio_peak    = 0.0
                 core_entry_equity = 0.0
 
-        # ══ adx_atr 止损/止盈（趋势=ATR吊灯棘轮，震荡=网格上下轨）════════════
-        if core_pos.is_open and cfg.entry_signal == "adx_atr" and i > core_entry_bar:
+        # ══ ATR 吊灯止损（d_ma趋势 + adx_atr趋势均适用；atr_trail_sl>0表示激活）
+        # 震荡/网格入场不走此路径（atr_trail_sl=0），仍用网格上下轨出场
+        if core_pos.is_open and cfg.entry_signal in ("d_ma", "adx_atr") and i > core_entry_bar:
             _adx_stop_reason = None
             pnl = (close - core_pos.entry_price) / core_pos.entry_price
 
@@ -1160,8 +1163,9 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                     _adx_stop_reason = (f"ATR吊灯止损 trail_sl={atr_trail_sl:.2f}"
                                         f" high={atr_highest_high:.2f} pnl={pnl:.2%}")
 
-            elif adx_entry_mode == "range" and cfg.grid_upper > 0:
-                # 震荡模式：网格上下轨止盈/止损（和d_ma volatile_vol一致）
+            elif (adx_entry_mode == "range" and cfg.grid_upper > 0
+                  and cfg.entry_signal == "adx_atr"):
+                # adx_atr震荡模式：网格上下轨止盈/止损（d_ma模式已有独立volatile_vol出场块）
                 if close >= cfg.grid_upper * (1 - cfg.grid_band):
                     _adx_stop_reason = f"ADX震荡网格上轨止盈 upper={cfg.grid_upper:.2f} pnl={pnl:.2%}"
                 elif close < cfg.grid_lower * (1 - cfg.grid_band):
