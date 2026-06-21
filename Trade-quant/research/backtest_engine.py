@@ -457,7 +457,8 @@ class StrategyConfig:
     # "swing_low" : 摆动低点：下影长+量能异常，随后连续收涨
     # "daily_ma"  : 日线MA支撑反弹（日线MA20/MA50触及收回）
     entry_signal: str = "h2_ma"
-    atr_trail_mult: float = 2.5   # adx_atr模式：吊灯追踪止损倍数（N×ATR from highest high）
+    atr_trail_mult: float = 2.5      # 吊灯追踪止损倍数（N×ATR from highest high）
+    atr_trail_mult_vol: float = 3.5  # volatile_vol 专用倍数（波动大，止损需更宽松）
 
     @property
     def effective_core_mode(self) -> str:
@@ -966,8 +967,12 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                         if cfg.entry_signal in ("d_ma", "adx_atr"):
                             _is_grid_entry = "网格" in entry_reason
                             adx_entry_mode = "range" if _is_grid_entry else "trend"
-                            if not _is_grid_entry and not pd.isna(d_atr_abs) and d_atr_abs > 0:
-                                atr_trail_sl     = close - cfg.atr_trail_mult * d_atr_abs
+                            # atr_trail_mult=0 时退化为原始d_ma行为（无追踪止损）
+                            _eff_mult = (cfg.atr_trail_mult_vol
+                                         if cfg.stock_type == "volatile_vol"
+                                         else cfg.atr_trail_mult)
+                            if not _is_grid_entry and _eff_mult > 0 and not pd.isna(d_atr_abs) and d_atr_abs > 0:
+                                atr_trail_sl     = close - _eff_mult * d_atr_abs
                                 atr_highest_high = close
 
         # ══ 金字塔核心仓：追加后续层（d_ma 模式不加仓）══════════════════════
@@ -1154,10 +1159,13 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
 
             if adx_entry_mode == "trend" and atr_trail_sl > 0:
                 # 趋势模式：吊灯追踪止损
+                _eff_mult = (cfg.atr_trail_mult_vol
+                             if cfg.stock_type == "volatile_vol"
+                             else cfg.atr_trail_mult)
                 bar_high = float(bar.get("high", close))
                 atr_highest_high = max(atr_highest_high, bar_high)
                 if is_new_day and not pd.isna(d_atr_abs) and d_atr_abs > 0:
-                    new_sl = atr_highest_high - cfg.atr_trail_mult * d_atr_abs
+                    new_sl = atr_highest_high - _eff_mult * d_atr_abs
                     atr_trail_sl = max(atr_trail_sl, new_sl)
                 if is_new_day and close < atr_trail_sl:
                     _adx_stop_reason = (f"ATR吊灯止损 trail_sl={atr_trail_sl:.2f}"

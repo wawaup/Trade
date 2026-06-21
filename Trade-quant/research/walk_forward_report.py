@@ -261,22 +261,18 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 
                     "reason": tr.reason[:60],
                 })
 
-            # ── adx_atr 对比跑（相同 IS 参数，不同入场/止损逻辑）─────────────
-            cfg_adx = StrategyConfig(stock_type=stype, core_mode="auto",
-                                     grid_upper=g_up, grid_lower=g_lo,
-                                     entry_signal="adx_atr",
-                                     d_trend_min_mas=d_trend_min_mas)
+            # ── 对比跑：d_ma 原始版（无ATR止损，atr_trail_mult=0）────────────
+            cfg_orig = StrategyConfig(stock_type=stype, core_mode="auto",
+                                      grid_upper=g_up, grid_lower=g_lo,
+                                      entry_signal="d_ma", atr_trail_mult=0.0,
+                                      atr_trail_mult_vol=0.0,
+                                      d_trend_min_mas=d_trend_min_mas)
             try:
-                adx_trades, adx_eq = run_backtest(df_oos, cfg_adx)
-                if not adx_trades:
-                    adx_ret, adx_alpha, adx_mdd = 0.0, -hold_ret, 0.0
-                else:
-                    adx_ret   = (adx_trades[-1].equity / cfg_adx.initial_capital - 1) * 100
-                    adx_alpha = adx_ret - hold_ret
-                    adx_dd    = (adx_eq - adx_eq.cummax()) / adx_eq.cummax() * 100
-                    adx_mdd   = round(float(adx_dd.min()), 1)
-            except Exception as e:
-                adx_ret, adx_alpha, adx_mdd = 0.0, 0.0, 0.0
+                orig_trades, _ = run_backtest(df_oos, cfg_orig)
+                orig_ret = (orig_trades[-1].equity / cfg_orig.initial_capital - 1) * 100 if orig_trades else 0.0
+                orig_alpha = orig_ret - hold_ret
+            except Exception:
+                orig_ret, orig_alpha = 0.0, 0.0
 
             sym_results[sym] = {
                 "sym": sym, "name": name, "sector": sector, "stype": stype,
@@ -287,9 +283,8 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 
                     "strat_mdd":    strat_mdd,
                     "t_entries":    len(t_buys),
                     "t_winrate":    round(t_wr, 0),
-                    "adx_return":   round(adx_ret,   1),
-                    "adx_alpha":    round(adx_alpha,  1),
-                    "adx_mdd":      adx_mdd,
+                    "orig_return":  round(orig_ret,  1),
+                    "orig_alpha":   round(orig_alpha, 1),
                 },
                 "ohlcv":        ohlcv,
                 "ma5":          ma5,
@@ -311,11 +306,13 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 
                 "oos_boundary": oob_ts,
             }
 
-            no_trade_tag = "  ⚠ 无入场信号" if not trades else ""
-            print(f"    {sym:8s} [{stype}]  strat={strat_ret:+.1f}%  hold={hold_ret:+.1f}%  "
-                  f"α={alpha:+.1f}%  mdd={strat_mdd:.1f}%{no_trade_tag}", flush=True)
-            print(f"    {' '*8}  [adx_atr]    ret={adx_ret:+.1f}%                    "
-                  f"α={adx_alpha:+.1f}%  mdd={adx_mdd:.1f}%", flush=True)
+            no_trade_tag = " ⚠" if not trades else ""
+            print(
+                f"    {sym:6s}[{stype[:3]}] "
+                f"hold={hold_ret:+5.1f}% │ "
+                f"d_ma原始={orig_ret:+6.1f}%(α{orig_alpha:+5.1f}%) │ "
+                f"d_ma+ATR={strat_ret:+6.1f}%(α{alpha:+5.1f}%)"
+                f"{no_trade_tag}", flush=True)
 
         all_windows.append({
             "id":       f"w{wi}",
@@ -559,25 +556,25 @@ function buildUI() {
           <div>
             <div class="metrics-card">
               <h4>OOS 指标</h4>
-              <div class="met-row"><span class="met-lbl">策略收益 (d_ma)</span>
-                <span class="met-val ${retCls}">${m.strat_return>=0?'+':''}${m.strat_return}%</span></div>
               <div class="met-row"><span class="met-lbl">持有收益</span>
                 <span class="met-val neu">${m.hold_return>=0?'+':''}${m.hold_return}%</span></div>
-              <div class="met-row"><span class="met-lbl">超额 α (d_ma)</span>
-                <span class="met-val ${alpCls}">${m.alpha>=0?'+':''}${m.alpha}%</span></div>
-              <div class="met-row"><span class="met-lbl">最大回撤 (d_ma)</span>
-                <span class="met-val ${mddCls}">${m.strat_mdd}%</span></div>
               <div style="margin-top:6px;padding-top:6px;border-top:1px solid #2d3748">
-                ${(()=>{const ar=m.adx_return,aa=m.adx_alpha;const arCls=ar>=0?'pos':'neg';const aaCls=aa>=0?'pos':'neg';
-                  return `<div class="met-row"><span class="met-lbl">策略收益 (adx_atr)</span>
-                    <span class="met-val ${arCls}">${ar>=0?'+':''}${ar}%</span></div>
-                  <div class="met-row"><span class="met-lbl">超额 α (adx_atr)</span>
-                    <span class="met-val ${aaCls}">${aa>=0?'+':''}${aa}%</span></div>
-                  <div class="met-row"><span class="met-lbl">最大回撤 (adx_atr)</span>
-                    <span class="met-val neg">${m.adx_mdd}%</span></div>`;})()}
+                <div style="font-size:10px;color:#8892a4;margin-bottom:3px">① d_ma 原始版</div>
+                ${(()=>{const or=m.orig_return??0,oa=m.orig_alpha??0;const orCls=or>=0?'pos':'neg';const oaCls=oa>=0?'pos':'neg';
+                  return `<div class="met-row"><span class="met-lbl">收益</span><span class="met-val ${orCls}">${or>=0?'+':''}${or}%</span></div>
+                  <div class="met-row"><span class="met-lbl">α</span><span class="met-val ${oaCls}">${oa>=0?'+':''}${oa}%</span></div>`;})()}
+              </div>
+              <div style="margin-top:6px;padding-top:6px;border-top:1px solid #2d3748">
+                <div style="font-size:10px;color:#8892a4;margin-bottom:3px">② d_ma+ATR止损</div>
+                <div class="met-row"><span class="met-lbl">收益</span>
+                  <span class="met-val ${retCls}">${m.strat_return>=0?'+':''}${m.strat_return}%</span></div>
+                <div class="met-row"><span class="met-lbl">α</span>
+                  <span class="met-val ${alpCls}">${m.alpha>=0?'+':''}${m.alpha}%</span></div>
+                <div class="met-row"><span class="met-lbl">MDD</span>
+                  <span class="met-val ${mddCls}">${m.strat_mdd}%</span></div>
               </div>
               <div style="margin-top:10px">
-                <span class="badge ${badgeCls}">${m.alpha>=0?'主动管理有效':'不如直接持有'}</span>
+                <span class="badge ${badgeCls}">${m.alpha>=0?'ATR有效':'不如持有'}</span>
               </div>
               <div style="margin-top:8px;font-size:11px;color:#8892a4;line-height:1.5">
                 IS 分类<br><span style="color:#c9d1e0">${stypeLabel}</span>
