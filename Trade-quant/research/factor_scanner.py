@@ -244,112 +244,148 @@ def compute_yearly_stats(ic_series_all, factor_names, horizon=5):
 
 # ── 可视化 ────────────────────────────────────────────────────────────────────
 
+_DARK_BG   = "#0d1117"   # 图表背景
+_DARK_AX   = "#161b22"   # axes 底色
+_GRID_CLR  = "#30363d"   # 网格线
+_TEXT_CLR  = "#e6edf3"   # 标题/刻度文字
+_POS_CLR   = "#39d353"   # 正向柱 / 强正向（亮绿）
+_NEG_CLR   = "#f85149"   # 负向柱 / 强负向（亮红）
+_CUM_CLR   = "#58a6ff"   # 累计IC折线（亮蓝）
+_MEAN_CLR  = "#ffd60a"   # 均值虚线（黄）
+
+
+def _dark_fig(nrows, figsize):
+    fig, axes = plt.subplots(nrows, 1, figsize=figsize, sharex=(nrows > 1))
+    fig.patch.set_facecolor(_DARK_BG)
+    if nrows == 1:
+        axes = [axes]
+    for ax in axes:
+        ax.set_facecolor(_DARK_AX)
+        ax.tick_params(colors=_TEXT_CLR, labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_edgecolor(_GRID_CLR)
+    return fig, axes
+
+
 def plot_heatmap(results, factor_names, out_path):
-    horizons = HORIZONS
+    horizons  = HORIZONS
     ic_grid   = np.array([[results[(f, h)]["IC_mean"] for h in horizons] for f in factor_names])
     icir_grid = np.array([[results[(f, h)]["ICIR"]    for h in horizons] for f in factor_names])
 
-    fig, ax = plt.subplots(figsize=(11, max(4, len(factor_names) * 1.0)))
+    fig, (ax,) = _dark_fig(1, (11, max(4, len(factor_names) * 1.0)))
     vmax = max(0.06, np.nanmax(np.abs(ic_grid)))
-    im = ax.imshow(ic_grid, cmap="RdYlGn", vmin=-vmax, vmax=vmax, aspect="auto")
+
+    # 自定义深色友好的 RdYlGn（避免中间黄色在深色底不清晰）
+    from matplotlib.colors import LinearSegmentedColormap
+    dark_rwg = LinearSegmentedColormap.from_list(
+        "dark_rwg",
+        ["#f85149", "#30363d", "#39d353"],  # 红 → 暗灰 → 亮绿
+    )
+    im = ax.imshow(ic_grid, cmap=dark_rwg, vmin=-vmax, vmax=vmax, aspect="auto")
 
     horizon_labels = {1: "持仓1天", 3: "持仓3天", 5: "持仓5天\n(约1周)",
                       10: "持仓10天\n(约2周)", 20: "持仓20天\n(约1月)"}
     ax.set_xticks(range(len(horizons)))
-    ax.set_xticklabels([horizon_labels.get(h, f"fwd_{h}d") for h in horizons], fontsize=9)
+    ax.set_xticklabels([horizon_labels.get(h, f"fwd_{h}d") for h in horizons],
+                       fontsize=9, color=_TEXT_CLR)
     ax.set_yticks(range(len(factor_names)))
-    ax.set_yticklabels(factor_names, fontsize=11)
+    ax.set_yticklabels(factor_names, fontsize=11, color=_TEXT_CLR)
 
     for i, fname in enumerate(factor_names):
         for j, h in enumerate(horizons):
             ic_v = ic_grid[i, j]
             ir_v = icir_grid[i, j]
-            if np.isnan(ic_v):
-                label = "N/A"
-            else:
-                star = "★" if not np.isnan(ir_v) and abs(ir_v) >= 0.5 else ""
-                label = f"{ic_v:+.3f}{star}"
-            bright = abs(ic_v) / vmax if not np.isnan(ic_v) else 0
-            ax.text(j, i, label, ha="center", va="center", fontsize=10,
-                    color="white" if bright > 0.65 else "black", fontweight="bold")
+            label = "N/A" if np.isnan(ic_v) else (
+                f"{ic_v:+.3f}{'★' if not np.isnan(ir_v) and abs(ir_v) >= 0.5 else ''}"
+            )
+            ax.text(j, i, label, ha="center", va="center",
+                    fontsize=10, color=_TEXT_CLR, fontweight="bold")
 
-    plt.colorbar(im, ax=ax, label="IC 均值", fraction=0.046, pad=0.04)
+    cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cb.set_label("IC 均值", color=_TEXT_CLR)
+    cb.ax.yaxis.set_tick_params(color=_TEXT_CLR)
+    plt.setp(cb.ax.yaxis.get_ticklabels(), color=_TEXT_CLR)
+
     ax.set_title(
         "全局 IC 均值热力图    ★ = |ICIR| ≥ 0.5（稳定有效）\n"
-        "绿=正向(追涨动量)  红=负向(均值回归)",
-        fontsize=10, pad=10,
+        "绿=正向(动量)  红=负向(反转)",
+        fontsize=10, pad=10, color=_TEXT_CLR,
     )
     plt.tight_layout()
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=_DARK_BG)
     plt.close()
 
 
 def plot_ic_series(ic_series_all, factor_names, out_path, horizon=5):
     n = len(factor_names)
-    fig, axes = plt.subplots(n, 1, figsize=(14, 3.5 * n), sharex=True)
-    if n == 1:
-        axes = [axes]
+    fig, axes = _dark_fig(n, (14, 3.5 * n))
 
-    # 绘制 regime 背景色
+    # 深色主题下的市场分期背景色（半透明覆盖层）
     regime_colors = {
-        "熊市(2022)":     "#ffcccc",
-        "反弹(22Q4)":     "#ffe8cc",
-        "AI牛市(23-24)":  "#ccffcc",
-        "关税震荡(25H1)": "#ffe8cc",
-        "复苏(25H2+)":    "#ccf0ff",
+        "熊市(2022)":     "#8b0000",  # 暗红
+        "反弹(22Q4)":     "#7a4f00",  # 暗橙
+        "AI牛市(23-24)":  "#004d00",  # 暗绿
+        "关税震荡(25H1)": "#7a4f00",  # 暗橙
+        "复苏(25H2+)":    "#003d66",  # 暗蓝
     }
 
     for ax, fname in zip(axes, factor_names):
         ic = ic_series_all.get((fname, horizon), pd.Series(dtype=float))
         if ic.empty:
-            ax.set_title(f"{fname}（无数据）")
+            ax.set_title(f"{fname}（无数据）", color=_TEXT_CLR)
             continue
 
-        # 市场环境背景（把 end 截断到数据实际范围，避免 x 轴被拉到 2099 年）
-        x_min = ic.index.min()
-        x_max = ic.index.max()
+        x_min, x_max = ic.index.min(), ic.index.max()
         for rname, (rs, re) in REGIMES.items():
             rs_ts = max(pd.Timestamp(rs), x_min)
             re_ts = min(pd.Timestamp(re), x_max)
             if rs_ts >= re_ts:
                 continue
             ax.axvspan(rs_ts, re_ts,
-                       alpha=0.15, color=regime_colors.get(rname, "#eee"), label=None)
+                       alpha=0.25, color=regime_colors.get(rname, "#333"), label=None)
 
         mean_v = ic.mean()
         std_v  = ic.std()
         icir_v = mean_v / std_v if std_v > 0 else 0
         cumulative = ic.cumsum()
 
-        bar_color = "#2dc653" if mean_v >= 0 else "#e63946"
-        ax.bar(ic.index, ic, color=bar_color, alpha=0.4, width=2)
-        ax.axhline(0,      color="#aaa", lw=0.5)
-        ax.axhline(mean_v, color=bar_color, lw=1.0, ls="--",
+        bar_clr = _POS_CLR if mean_v >= 0 else _NEG_CLR
+        # 每根柱按正负上色
+        colors = [_POS_CLR if v >= 0 else _NEG_CLR for v in ic]
+        ax.bar(ic.index, ic, color=colors, alpha=0.55, width=2)
+        ax.axhline(0,      color=_GRID_CLR, lw=0.8)
+        ax.axhline(mean_v, color=_MEAN_CLR, lw=1.2, ls="--",
                    label=f"均值 {mean_v:+.4f}")
 
         ax2 = ax.twinx()
-        ax2.plot(ic.index, cumulative, color="#1a1a2e", lw=1.3, label="累计IC")
-        ax2.set_ylabel("累计IC", fontsize=8, color="#1a1a2e")
+        ax2.plot(ic.index, cumulative, color=_CUM_CLR, lw=1.5, label="累计IC")
+        ax2.set_facecolor(_DARK_AX)
+        ax2.tick_params(colors=_TEXT_CLR, labelsize=7)
+        ax2.set_ylabel("累计IC", fontsize=8, color=_CUM_CLR)
+        for spine in ax2.spines.values():
+            spine.set_edgecolor(_GRID_CLR)
 
         ax.set_title(
-            f"{fname}  →  fwd_{horizon}d    "
+            f"{fname}  →  持仓{horizon}天    "
             f"IC均值={mean_v:+.4f}  ICIR={icir_v:+.3f}  n={len(ic)}天",
-            fontsize=10,
+            fontsize=10, color=_TEXT_CLR,
         )
-        ax.set_ylabel("IC")
-        ax.legend(loc="upper left", fontsize=7, framealpha=0.7)
-        ax.grid(alpha=0.2)
+        ax.set_ylabel("IC", color=_TEXT_CLR)
+        ax.legend(loc="upper left", fontsize=7, framealpha=0.4,
+                  facecolor=_DARK_AX, labelcolor=_TEXT_CLR, edgecolor=_GRID_CLR)
+        ax.grid(alpha=0.15, color=_GRID_CLR)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
         ax.xaxis.set_major_locator(mdates.MonthLocator(interval=6))
-        plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right", fontsize=7)
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right",
+                 fontsize=7, color=_TEXT_CLR)
 
     plt.suptitle(
-        f"各因子 IC 时序（fwd_{horizon}d）\n"
-        "背景色：红=熊市  橙=震荡  绿=牛市  蓝=复苏",
-        fontsize=11, y=1.002,
+        f"各因子 IC 时序（持仓{horizon}天）\n"
+        "背景色：暗红=熊市  暗橙=震荡  暗绿=牛市  暗蓝=复苏",
+        fontsize=11, y=1.002, color=_TEXT_CLR,
     )
     plt.tight_layout()
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=_DARK_BG)
     plt.close()
 
 
@@ -399,22 +435,24 @@ def generate_html_report(
     * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
            margin: 0; background: #f0f2f5; color: #212529; }
-    /* 主内容区：左右各留 210px / 270px 避开两侧固定面板 */
-    .main { margin-left: 210px; margin-right: 270px;
-            padding: 28px 32px; min-width: 0; }
-    /* 左侧固定面板：颜色速查 */
-    .left-panel { position: fixed; left: 0; top: 0; bottom: 0; width: 200px;
-                  background: rgba(26,26,46,0.93); color: #fff;
-                  padding: 18px 14px; overflow-y: auto; z-index: 100;
-                  font-size: 0.8em; line-height: 1.5; }
-    .left-panel .panel-title { font-weight: 700; font-size: 1em;
-                                border-bottom: 1px solid rgba(255,255,255,.25);
-                                padding-bottom: 8px; margin-bottom: 10px; }
-    .fl-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
-    .fl-dot { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+    /* 主内容区：右留 270px 避开右侧固定面板，左侧只留少量边距 */
+    .main { margin-left: 20px; margin-right: 275px;
+            padding: 24px 28px; min-width: 0; }
+    /* 左下角小浮窗：颜色速查 */
+    .float-legend { position: fixed; left: 18px; bottom: 18px; z-index: 999;
+                    background: rgba(13,17,23,0.92); color: #e6edf3;
+                    border: 1px solid #30363d; border-radius: 10px;
+                    padding: 12px 14px; width: 186px;
+                    font-size: 0.79em; line-height: 1.55;
+                    box-shadow: 0 4px 18px rgba(0,0,0,.5); }
+    .fl-title { font-weight: 700; font-size: 0.92em; color: #fff;
+                border-bottom: 1px solid #30363d;
+                padding-bottom: 7px; margin-bottom: 9px; }
+    .fl-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+    .fl-dot { width: 13px; height: 13px; border-radius: 3px; flex-shrink: 0; }
     .fl-star { color: #ffa726; }
-    .left-panel .note-sm { margin-top: 12px; border-top: 1px solid rgba(255,255,255,.2);
-                            padding-top: 10px; font-size: 0.9em; color: #ccc; }
+    .fl-note { margin-top: 9px; border-top: 1px solid #30363d;
+               padding-top: 8px; font-size: 0.88em; color: #8b949e; }
     /* 右侧固定面板：解读指南 */
     .right-panel { position: fixed; right: 0; top: 0; bottom: 0; width: 260px;
                    background: #fff; border-left: 1px solid #dde;
@@ -501,28 +539,19 @@ def generate_html_report(
             rows += f"<tr>{row}</tr>"
         return f'<table><thead><tr><th>因子</th>{cols}</tr></thead><tbody>{rows}</tbody></table>'
 
-    # ── 左侧固定面板：颜色速查 ───────────────────────────────────────────────
+    # ── 左下角小浮窗：颜色速查 ──────────────────────────────────────────────
     left_panel = """
-    <div class="left-panel">
-      <div class="panel-title">🎨 颜色含义速查</div>
-      <div class="fl-row"><div class="fl-dot" style="background:#4caf50"></div>
-        强有效·正向（动量）</div>
-      <div class="fl-row"><div class="fl-dot" style="background:#f44336"></div>
-        强有效·负向（反转）</div>
-      <div class="fl-row"><div class="fl-dot" style="background:#a5d6a7"></div>
-        弱有效·正向</div>
-      <div class="fl-row"><div class="fl-dot" style="background:#ef9a9a"></div>
-        弱有效·负向</div>
-      <div class="fl-row">
-        <div class="fl-dot" style="background:#fffde7;border:1px solid #aaa"></div>
-        微弱信号</div>
-      <div class="fl-row"><div class="fl-dot" style="background:#e0e0e0"></div>
-        噪音·无意义</div>
-      <div class="note-sm">
-        <span class="fl-star">★</span> = ICIR ≥ 0.5<br>（表现稳定，非偶然）<br><br>
-        有效标准：<br>
-        |IC| &gt; 0.03<br>
-        且 |ICIR| &gt; 0.5
+    <div class="float-legend">
+      <div class="fl-title">🎨 颜色含义速查</div>
+      <div class="fl-row"><div class="fl-dot" style="background:#4caf50"></div>强有效·正向（动量）</div>
+      <div class="fl-row"><div class="fl-dot" style="background:#f44336"></div>强有效·负向（反转）</div>
+      <div class="fl-row"><div class="fl-dot" style="background:#a5d6a7"></div>弱有效·正向</div>
+      <div class="fl-row"><div class="fl-dot" style="background:#ef9a9a"></div>弱有效·负向</div>
+      <div class="fl-row"><div class="fl-dot" style="background:#fffde7;border:1px solid #555"></div>微弱信号</div>
+      <div class="fl-row"><div class="fl-dot" style="background:#e0e0e0"></div>噪音·无意义</div>
+      <div class="fl-note">
+        <span class="fl-star">★</span> = ICIR ≥ 0.5（稳定有效）<br>
+        标准：|IC| &gt; 0.03 且 |ICIR| &gt; 0.5
       </div>
     </div>
     """
