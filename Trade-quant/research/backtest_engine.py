@@ -132,11 +132,32 @@ def add_daily_weekly_trend(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
         daily["d_close20_high"] = daily["close"].shift(1).rolling(20, min_periods=15).max()
         daily["d_breakout20"]   = daily["close"] > daily["d_close20_high"]
 
+        # ATR（绝对值，用于吊灯追踪止损）+ ADX（动态趋势强度）
+        _tr = pd.concat([
+            daily["high"] - daily["low"],
+            (daily["high"] - daily["close"].shift(1)).abs(),
+            (daily["low"]  - daily["close"].shift(1)).abs(),
+        ], axis=1).max(axis=1)
+        daily["d_atr"] = _tr.ewm(alpha=1/14, adjust=False).mean()
+
+        _up  = (daily["high"] - daily["high"].shift(1)).clip(lower=0)
+        _dn  = (daily["low"].shift(1) - daily["low"]).clip(lower=0)
+        _dmp = _up.where((_up > _dn) & (_up > 0), 0.0)
+        _dmm = _dn.where((_dn >= _up) & (_dn > 0), 0.0)
+        _atr_nz = daily["d_atr"].replace(0, np.nan)
+        _dip = 100 * _dmp.ewm(alpha=1/14, adjust=False).mean() / _atr_nz
+        _dim = 100 * _dmm.ewm(alpha=1/14, adjust=False).mean() / _atr_nz
+        _dx  = 100 * (_dip - _dim).abs() / (_dip + _dim).replace(0, np.nan)
+        daily["d_adx"] = _dx.ewm(alpha=1/14, adjust=False).mean()
+        daily["d_dip"]  = _dip
+        daily["d_dim"]  = _dim
+
         sig_cols = ["d_close", "d_ma5", "d_ma10", "d_ma20",
                     "d_ma30", "d_ma60", "d_ma250", "d_trend_dn",
                     "d_touch", "d_touch5", "d_touch10", "d_touch20",
                     "d_above5", "d_above10", "d_above20", "d_below_ma5",
-                    "d_trend_20d_up", "d_breakout20"]
+                    "d_trend_20d_up", "d_breakout20",
+                    "d_atr", "d_adx", "d_dip", "d_dim"]
         daily_sig = daily[sig_cols].copy()
         daily_sig.index = daily_sig.index + pd.Timedelta(days=1)
         daily_sig = daily_sig.reindex(out.index, method="ffill")
@@ -156,6 +177,8 @@ def add_daily_weekly_trend(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
         for n in [5, 10, 20]:
             out[f"d_touch{n}"] = daily_sig[f"d_touch{n}"].fillna(False).astype(bool)
             out[f"d_above{n}"] = daily_sig[f"d_above{n}"].fillna(False).astype(bool)
+        for col in ["d_atr", "d_adx", "d_dip", "d_dim"]:
+            out[col] = daily_sig[col]
     except Exception:
         for col in ["d_close", "d_ma5", "d_ma10", "d_ma20",
                     "d_ma30", "d_ma60", "d_ma250"]:
@@ -170,6 +193,8 @@ def add_daily_weekly_trend(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
         for n in [5, 10, 20]:
             out[f"d_touch{n}"] = False
             out[f"d_above{n}"] = False
+        for col in ["d_atr", "d_adx", "d_dip", "d_dim"]:
+            out[col] = np.nan
 
     return out
 
@@ -432,6 +457,7 @@ class StrategyConfig:
     # "swing_low" : 摆动低点：下影长+量能异常，随后连续收涨
     # "daily_ma"  : 日线MA支撑反弹（日线MA20/MA50触及收回）
     entry_signal: str = "h2_ma"
+    atr_trail_mult: float = 2.5   # adx_atr模式：吊灯追踪止损倍数（N×ATR from highest high）
 
     @property
     def effective_core_mode(self) -> str:
@@ -552,6 +578,10 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
     d_sig_ma10      = False
     d_sig_ma20      = False
     d_breakout_ready = False  # 20日新高突破，下一根1H bar入场
+    # adx_atr 模式：吊灯追踪止损状态
+    atr_trail_sl       = 0.0   # 当前追踪止损线（0=未激活）
+    atr_highest_high   = 0.0   # 持仓期间最高价（棘轮上移用）
+    adx_entry_mode     = ""    # "trend" 或 "range"，区分止损逻辑
     cash            = cfg.initial_capital
     trades: list[Trade] = []
     equity         = []
@@ -640,8 +670,18 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
         d_breakout20      = bool(bar.get("d_breakout20",      False))
         # volatile_vol 是否突破 IS 震荡上轨（5%缓冲），突破后切趋势模式
         grid_breakout     = (cfg.grid_upper > 0 and close > cfg.grid_upper * 1.05)
-        # 入场门槛：大盘多头(SPY周线>MA20) + 个股周收盘站上MA5 + 周线未确认空头
+        # 普通入场门槛：大盘多头 + 个股周线两条件
         w_entry_gate      = mkt_regime and w_close_above_ma5 and not w_trend_dn
+        # ADX 动态趋势因子（adx_atr 模式使用）
+        d_atr_abs    = float(bar.get("d_atr", np.nan))
+        d_adx_val    = float(bar.get("d_adx", 0.0))
+        d_dip_val    = float(bar.get("d_dip", 0.0))
+        d_dim_val    = float(bar.get("d_dim", 0.0))
+        _adx_valid   = not pd.isna(d_adx_val) and d_adx_val > 0
+        adx_trend_up = _adx_valid and (d_adx_val >= 25) and (d_dip_val > d_dim_val)
+        adx_range    = _adx_valid and (d_adx_val < 20)
+        # 突破上轨后的入场门槛：个股已有强势动量，不再等 SPY 慢慢恢复
+        w_entry_gate_breakout = w_close_above_ma5 and not w_trend_dn
         any_trend_dn = d_trend_dn
         t_trend_dn   = d_trend_dn
 
@@ -755,9 +795,11 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
             # volatile_vol 突破 IS 上轨（grid_breakout）时也走趋势路径
             elif cfg.entry_signal == "d_ma" and (
                     cfg.stock_type != "volatile_vol"
-                    or (mkt_regime and grid_breakout)):
-                if not w_entry_gate:
-                    # 周线门槛未满足：重置所有信号
+                    or grid_breakout):
+                # 突破上轨的个股不等SPY恢复，只需个股自身周线满足
+                _active_gate = w_entry_gate_breakout if grid_breakout else w_entry_gate
+                if not _active_gate:
+                    # 门槛未满足：重置所有信号
                     d_sig_count = 0
                     d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
                     d_breakout_ready = False
@@ -824,6 +866,59 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                     entry_triggered = True
                     entry_reason    = f"日线MA{'20' if touch_ma20 else '60'}支撑反弹 vol={vol_r:.1f}x"
 
+            # ── adx_atr：ADX动态状态机 + ATR吊灯止损 ────────────────────────
+            elif cfg.entry_signal == "adx_atr":
+                # grid_breakout 股票（已突破IS上轨）可绕过SPY regime，与d_ma逻辑一致
+                _adx_regime_ok = (mkt_regime or grid_breakout) and w_close_above_ma5 and not w_trend_dn
+                if adx_trend_up and _adx_regime_ok:
+                    # 趋势模式：ADX≥25 且 DI+>DI-，复用日线MA回踩K1/K2和20日突破
+                    if is_new_day:
+                        if d_touch:
+                            d_sig_count = 1
+                            d_sig_ma5   = d_touch5
+                            d_sig_ma10  = d_touch10
+                            d_sig_ma20  = d_touch20
+                        elif d_sig_count == 1:
+                            same_ma_ok = (
+                                (d_sig_ma5  and d_above5)  or
+                                (d_sig_ma10 and d_above10) or
+                                (d_sig_ma20 and d_above20)
+                            )
+                            if same_ma_ok:
+                                d_sig_count = 2
+                            else:
+                                d_sig_count = 0
+                                d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
+                        else:
+                            d_sig_count = 0
+                            d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
+                        d_breakout_ready = d_breakout20
+
+                    if d_sig_count == 2:
+                        entry_triggered = True
+                        which = "MA5" if d_sig_ma5 else ("MA10" if d_sig_ma10 else "MA20")
+                        entry_reason    = f"ADX趋势+{which}回踩确认"
+                        d_sig_count = 0
+                        d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
+                        d_breakout_ready = False
+                    elif d_breakout_ready:
+                        entry_triggered  = True
+                        entry_reason     = "ADX趋势+20日新高突破"
+                        d_breakout_ready = False
+
+                elif adx_range and cfg.grid_upper > 0:
+                    # 震荡模式：ADX<20，网格下轨买入
+                    _glo = cfg.grid_lower * (1 - cfg.grid_band)
+                    _ghi = cfg.grid_lower * (1 + cfg.grid_band)
+                    if cfg.grid_lower > 0 and _glo <= close <= _ghi:
+                        entry_triggered = True
+                        entry_reason = f"ADX震荡+网格下轨 lower={cfg.grid_lower:.2f}"
+                else:
+                    # ADX中性区间或无有效网格：重置日线信号
+                    d_sig_count = 0
+                    d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
+                    d_breakout_ready = False
+
             # ── 执行建仓 / 加仓 ──────────────────────────────────────────────
             if entry_triggered:
                 if _allow_add:
@@ -843,7 +938,7 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                         ))
                 else:
                     # 首次建仓
-                    if cfg.entry_signal == "d_ma":
+                    if cfg.entry_signal in ("d_ma", "adx_atr"):
                         buy_value = _full_value
                         nxt_tgt   = 0.0
                     elif cfg.effective_core_mode == "pyramid":
@@ -866,6 +961,12 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                             reason=entry_reason,
                             equity=cash + core_pos.size * close,
                         ))
+                        # adx_atr 模式：建仓时初始化止损状态
+                        if cfg.entry_signal == "adx_atr":
+                            adx_entry_mode = "range" if "网格" in entry_reason else "trend"
+                            if adx_entry_mode == "trend" and not pd.isna(d_atr_abs) and d_atr_abs > 0:
+                                atr_trail_sl     = close - cfg.atr_trail_mult * d_atr_abs
+                                atr_highest_high = close
 
         # ══ 金字塔核心仓：追加后续层（d_ma 模式不加仓）══════════════════════
         if (core_pos.is_open and cfg.entry_signal != "d_ma"
@@ -894,8 +995,8 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 ))
 
         # ══ small_vol 专属止损 ══════════════════════════════════════════════
-        # large_vol 不启用：超级趋势股中途震仓易被踢出主升浪
-        if core_pos.is_open and cfg.stock_type == "small_vol":
+        # large_vol 不启用；adx_atr 模式使用ATR追踪止损，不走此路径
+        if core_pos.is_open and cfg.stock_type == "small_vol" and cfg.entry_signal != "adx_atr":
             core_hold_bars += 1
             core_pnl        = (close - core_pos.entry_price) / core_pos.entry_price
             portfolio_peak  = max(portfolio_peak, cur_equity)
@@ -944,7 +1045,7 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
             else (is_new_h2 and h2_below_ma5)
         )
         _stop_label = "日线跌破MA5" if _use_daily_stop else "2H跌破MA5"
-        if (core_pos.is_open and cfg.entry_signal != "d_ma"
+        if (core_pos.is_open and cfg.entry_signal not in ("d_ma", "adx_atr")
                 and cfg.effective_core_mode == "pyramid"
                 and _stop_trigger and i > core_entry_bar):
             pnl = (close - core_pos.entry_price) / core_pos.entry_price
@@ -990,8 +1091,8 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                     ))
                     t_pos = Position(); t_day_count = 0
 
-        # ══ 金字塔止损：跌破上一层入场价（d_ma 模式不适用）══════════════════
-        if (core_pos.is_open and cfg.entry_signal != "d_ma"
+        # ══ 金字塔止损：跌破上一层入场价（d_ma / adx_atr 模式不适用）══════════
+        if (core_pos.is_open and cfg.entry_signal not in ("d_ma", "adx_atr")
                 and cfg.effective_core_mode == "pyramid"
                 and core_pos.layers >= 2 and close < core_pos.prev_layer_price):
             pnl   = (close - core_pos.entry_price) / core_pos.entry_price
@@ -1043,12 +1144,54 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 portfolio_peak    = 0.0
                 core_entry_equity = 0.0
 
+        # ══ adx_atr 止损/止盈（趋势=ATR吊灯棘轮，震荡=网格上下轨）════════════
+        if core_pos.is_open and cfg.entry_signal == "adx_atr" and i > core_entry_bar:
+            _adx_stop_reason = None
+            pnl = (close - core_pos.entry_price) / core_pos.entry_price
+
+            if adx_entry_mode == "trend" and atr_trail_sl > 0:
+                # 趋势模式：吊灯追踪止损
+                bar_high = float(bar.get("high", close))
+                atr_highest_high = max(atr_highest_high, bar_high)
+                if is_new_day and not pd.isna(d_atr_abs) and d_atr_abs > 0:
+                    new_sl = atr_highest_high - cfg.atr_trail_mult * d_atr_abs
+                    atr_trail_sl = max(atr_trail_sl, new_sl)
+                if is_new_day and close < atr_trail_sl:
+                    _adx_stop_reason = (f"ATR吊灯止损 trail_sl={atr_trail_sl:.2f}"
+                                        f" high={atr_highest_high:.2f} pnl={pnl:.2%}")
+
+            elif adx_entry_mode == "range" and cfg.grid_upper > 0:
+                # 震荡模式：网格上下轨止盈/止损（和d_ma volatile_vol一致）
+                if close >= cfg.grid_upper * (1 - cfg.grid_band):
+                    _adx_stop_reason = f"ADX震荡网格上轨止盈 upper={cfg.grid_upper:.2f} pnl={pnl:.2%}"
+                elif close < cfg.grid_lower * (1 - cfg.grid_band):
+                    _adx_stop_reason = f"ADX震荡网格下轨止损 lower={cfg.grid_lower:.2f} pnl={pnl:.2%}"
+
+            if _adx_stop_reason:
+                net = core_pos.size * close * (1 - cfg.commission_pct)
+                cash += net
+                trades.append(Trade(
+                    time=t, action="CORE_STOP", price=close, size=core_pos.size,
+                    reason=_adx_stop_reason, pnl_pct=pnl,
+                    equity=cash + t_pos.size * close,
+                ))
+                core_pos         = Position()
+                core_h2_count    = 0
+                d_sig_count      = 0
+                d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
+                core_hold_bars   = 0
+                portfolio_peak   = 0.0
+                core_entry_equity = 0.0
+                atr_trail_sl     = 0.0
+                atr_highest_high = 0.0
+                adx_entry_mode   = ""
+
         # ══ T仓管理（核心仓不存在时跳过）══════════════════════════════════
         if not core_pos.is_open:
             continue
 
         # ── 日线T仓（d_ma 模式）── 暂停，专注核心仓策略优化 ─────────────────
-        if cfg.entry_signal == "d_ma":
+        if cfg.entry_signal in ("d_ma", "adx_atr"):
             # T仓逻辑暂时注释，待核心仓策略稳定后启用
             # if t_pos.is_open:
             #     t_pnl = (close - t_pos.entry_price) / t_pos.entry_price

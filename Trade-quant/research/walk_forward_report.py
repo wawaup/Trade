@@ -261,6 +261,23 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 
                     "reason": tr.reason[:60],
                 })
 
+            # ── adx_atr 对比跑（相同 IS 参数，不同入场/止损逻辑）─────────────
+            cfg_adx = StrategyConfig(stock_type=stype, core_mode="auto",
+                                     grid_upper=g_up, grid_lower=g_lo,
+                                     entry_signal="adx_atr",
+                                     d_trend_min_mas=d_trend_min_mas)
+            try:
+                adx_trades, adx_eq = run_backtest(df_oos, cfg_adx)
+                if not adx_trades:
+                    adx_ret, adx_alpha, adx_mdd = 0.0, -hold_ret, 0.0
+                else:
+                    adx_ret   = (adx_trades[-1].equity / cfg_adx.initial_capital - 1) * 100
+                    adx_alpha = adx_ret - hold_ret
+                    adx_dd    = (adx_eq - adx_eq.cummax()) / adx_eq.cummax() * 100
+                    adx_mdd   = round(float(adx_dd.min()), 1)
+            except Exception as e:
+                adx_ret, adx_alpha, adx_mdd = 0.0, 0.0, 0.0
+
             sym_results[sym] = {
                 "sym": sym, "name": name, "sector": sector, "stype": stype,
                 "metrics": {
@@ -270,6 +287,9 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 
                     "strat_mdd":    strat_mdd,
                     "t_entries":    len(t_buys),
                     "t_winrate":    round(t_wr, 0),
+                    "adx_return":   round(adx_ret,   1),
+                    "adx_alpha":    round(adx_alpha,  1),
+                    "adx_mdd":      adx_mdd,
                 },
                 "ohlcv":        ohlcv,
                 "ma5":          ma5,
@@ -294,6 +314,8 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 
             no_trade_tag = "  ⚠ 无入场信号" if not trades else ""
             print(f"    {sym:8s} [{stype}]  strat={strat_ret:+.1f}%  hold={hold_ret:+.1f}%  "
                   f"α={alpha:+.1f}%  mdd={strat_mdd:.1f}%{no_trade_tag}", flush=True)
+            print(f"    {' '*8}  [adx_atr]    ret={adx_ret:+.1f}%                    "
+                  f"α={adx_alpha:+.1f}%  mdd={adx_mdd:.1f}%", flush=True)
 
         all_windows.append({
             "id":       f"w{wi}",
@@ -537,18 +559,23 @@ function buildUI() {
           <div>
             <div class="metrics-card">
               <h4>OOS 指标</h4>
-              <div class="met-row"><span class="met-lbl">策略收益</span>
+              <div class="met-row"><span class="met-lbl">策略收益 (d_ma)</span>
                 <span class="met-val ${retCls}">${m.strat_return>=0?'+':''}${m.strat_return}%</span></div>
               <div class="met-row"><span class="met-lbl">持有收益</span>
                 <span class="met-val neu">${m.hold_return>=0?'+':''}${m.hold_return}%</span></div>
-              <div class="met-row"><span class="met-lbl">超额 α</span>
+              <div class="met-row"><span class="met-lbl">超额 α (d_ma)</span>
                 <span class="met-val ${alpCls}">${m.alpha>=0?'+':''}${m.alpha}%</span></div>
-              <div class="met-row"><span class="met-lbl">策略最大回撤</span>
+              <div class="met-row"><span class="met-lbl">最大回撤 (d_ma)</span>
                 <span class="met-val ${mddCls}">${m.strat_mdd}%</span></div>
-              <div class="met-row"><span class="met-lbl">T 入场次数</span>
-                <span class="met-val neu">${m.t_entries}</span></div>
-              <div class="met-row"><span class="met-lbl">T 胜率</span>
-                <span class="met-val neu">${m.t_winrate}%</span></div>
+              <div style="margin-top:6px;padding-top:6px;border-top:1px solid #2d3748">
+                ${(()=>{const ar=m.adx_return,aa=m.adx_alpha;const arCls=ar>=0?'pos':'neg';const aaCls=aa>=0?'pos':'neg';
+                  return `<div class="met-row"><span class="met-lbl">策略收益 (adx_atr)</span>
+                    <span class="met-val ${arCls}">${ar>=0?'+':''}${ar}%</span></div>
+                  <div class="met-row"><span class="met-lbl">超额 α (adx_atr)</span>
+                    <span class="met-val ${aaCls}">${aa>=0?'+':''}${aa}%</span></div>
+                  <div class="met-row"><span class="met-lbl">最大回撤 (adx_atr)</span>
+                    <span class="met-val neg">${m.adx_mdd}%</span></div>`;})()}
+              </div>
               <div style="margin-top:10px">
                 <span class="badge ${badgeCls}">${m.alpha>=0?'主动管理有效':'不如直接持有'}</span>
               </div>
@@ -865,7 +892,7 @@ function createEqChart(containerId, sd) {
     handleScale:  false,
   });
 
-  const fixedRange = () => ({ priceRange: { minValue: 80, maxValue: 140 } });
+  const fixedRange = () => ({ priceRange: { minValue: 80, maxValue: 120 } });
 
   const stratLine = chart.addLineSeries({
     color: '#34d399', lineWidth: 2,
@@ -874,8 +901,8 @@ function createEqChart(containerId, sd) {
   });
   stratLine.setData(sd.equity);
 
-  // 每5单位一条参考横线（10的倍数显示轴标，其余虚线辅助）
-  for (let lvl = 80; lvl <= 140; lvl += 5) {
+  // 每2单位一条参考横线（10的倍数实线显轴标，偶数浅虚线辅助）
+  for (let lvl = 80; lvl <= 120; lvl += 2) {
     stratLine.createPriceLine({
       price: lvl,
       color: lvl % 10 === 0 ? '#2d3550' : '#1c2235',
@@ -892,6 +919,32 @@ function createEqChart(containerId, sd) {
     autoscaleInfoProvider: fixedRange,
   });
   holdLine.setData(sd.hold);
+
+  // 构建 time → value 查找表
+  const stratMap = {}, holdMap = {};
+  (sd.equity || []).forEach(d => { stratMap[d.time] = d.value; });
+  (sd.hold   || []).forEach(d => { holdMap[d.time]  = d.value; });
+
+  // Tooltip
+  const tip = document.createElement('div');
+  tip.style.cssText = 'position:absolute;top:6px;left:8px;pointer-events:none;'
+    + 'background:#1a1f2e;border:1px solid #2d3348;border-radius:4px;'
+    + 'padding:4px 8px;font-size:11px;color:#8892a4;line-height:1.6;display:none;z-index:10';
+  el.style.position = 'relative';
+  el.appendChild(tip);
+
+  chart.subscribeCrosshairMove(param => {
+    if (!param.time || !param.point || param.point.x < 0) {
+      tip.style.display = 'none'; return;
+    }
+    const t = param.time;
+    const sv = stratMap[t], hv = holdMap[t];
+    if (sv == null && hv == null) { tip.style.display = 'none'; return; }
+    const fmt = v => v != null ? '<b style="color:#e2e8f0">' + v.toFixed(1) + '</b>' : '—';
+    tip.innerHTML = `<span style="color:#34d399">●</span> 策略 ${fmt(sv)}&nbsp;&nbsp;`
+                  + `<span style="color:#93c5fd">●</span> 持有 ${fmt(hv)}`;
+    tip.style.display = 'block';
+  });
 
   chart.timeScale().fitContent();
 }
@@ -924,7 +977,7 @@ def main():
     parser.add_argument("--out",         type=str, default=str(DEFAULT_OUT))
     parser.add_argument("--is",          type=int, default=6,  dest="is_months")
     parser.add_argument("--oos",         type=int, default=2,  dest="oos_months")
-    parser.add_argument("--step",        type=int, default=1,  dest="step_months")
+    parser.add_argument("--step",        type=int, default=2,  dest="step_months")
     parser.add_argument("--max-windows",    type=int, default=0,  dest="max_windows",
                         help="只跑前N个窗口（0=全跑）")
     parser.add_argument("--d-trend-min-mas", type=int, default=4, dest="d_trend_min_mas",
