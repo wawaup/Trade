@@ -106,6 +106,24 @@ def add_signals(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def apply_liquidity_filter(
+    df: pd.DataFrame,
+    min_dollar_vol: float = 5_000_000,
+    min_price: float = 2.0,
+    window: int = 20,
+) -> pd.DataFrame:
+    """
+    将流动性不足的交易日的因子值置为 NaN，避免仙股异动污染 IC。
+
+    条件：20日平均成交额 >= min_dollar_vol 且 收盘价 >= min_price。
+    不删行，只打 NaN，保留时间序列连续性。
+    """
+    dollar_vol = (df["close"] * df["volume"]).rolling(window).mean()
+    illiquid = (dollar_vol < min_dollar_vol) | (df["close"] < min_price)
+    df["liquid"] = (~illiquid).astype(int)  # 1=流动性足够，0=过滤掉
+    return df
+
+
 def compute_all(symbol: str, timeframe: str) -> pd.DataFrame:
     raw = load_raw(symbol, timeframe)
     df = raw[["open", "high", "low", "close", "volume"]].copy()
@@ -125,6 +143,7 @@ def compute_all(symbol: str, timeframe: str) -> pd.DataFrame:
     df["vol_ratio"] = df["volume"] / df["volume"].rolling(20).mean()
 
     df = add_signals(df)
+    df = apply_liquidity_filter(df)
     return df.dropna(subset=["MA20", "KDJ_K"])
 
 
