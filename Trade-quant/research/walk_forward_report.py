@@ -520,6 +520,8 @@ function buildUI() {
                 <span class="leg-item"><span class="leg-dot" style="background:#f59e0b"></span>MA5</span>
                 <span class="leg-item"><span class="leg-dot" style="background:#34d399"></span>MA10</span>
                 <span class="leg-item"><span class="leg-dot" style="background:#8b5cf6"></span>MA20</span>
+                <span class="leg-item"><span class="leg-dot" style="background:#fb923c"></span>MA60</span>
+                <span class="leg-item"><span class="leg-dot" style="background:#f43f5e"></span>MA250</span>
                 <span class="leg-item" style="color:#8892a4">▲ 买入</span>
                 <span class="leg-item" style="color:#f87171">▼ 卖出</span>
                 <span style="color:#3d4f6b;font-size:11px">| 灰色=IS背景</span>

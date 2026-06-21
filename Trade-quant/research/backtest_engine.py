@@ -128,11 +128,15 @@ def add_daily_weekly_trend(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
             (daily["d_ma10"] > daily["d_ma10"].shift(10))
         )
 
+        # 20日收盘新高突破：今日收盘 > 过去20日最高收盘（不含今日，防前视）
+        daily["d_close20_high"] = daily["close"].shift(1).rolling(20, min_periods=15).max()
+        daily["d_breakout20"]   = daily["close"] > daily["d_close20_high"]
+
         sig_cols = ["d_close", "d_ma5", "d_ma10", "d_ma20",
                     "d_ma30", "d_ma60", "d_ma250", "d_trend_dn",
                     "d_touch", "d_touch5", "d_touch10", "d_touch20",
                     "d_above5", "d_above10", "d_above20", "d_below_ma5",
-                    "d_trend_20d_up"]
+                    "d_trend_20d_up", "d_breakout20"]
         daily_sig = daily[sig_cols].copy()
         daily_sig.index = daily_sig.index + pd.Timedelta(days=1)
         daily_sig = daily_sig.reindex(out.index, method="ffill")
@@ -148,6 +152,7 @@ def add_daily_weekly_trend(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
         out["d_touch"]      = daily_sig["d_touch"].fillna(False).astype(bool)
         out["d_below_ma5"]     = daily_sig["d_below_ma5"].fillna(False).astype(bool)
         out["d_trend_20d_up"]  = daily_sig["d_trend_20d_up"].fillna(False).astype(bool)
+        out["d_breakout20"]    = daily_sig["d_breakout20"].fillna(False).astype(bool)
         for n in [5, 10, 20]:
             out[f"d_touch{n}"] = daily_sig[f"d_touch{n}"].fillna(False).astype(bool)
             out[f"d_above{n}"] = daily_sig[f"d_above{n}"].fillna(False).astype(bool)
@@ -161,6 +166,7 @@ def add_daily_weekly_trend(out: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
         out["d_touch"]        = False
         out["d_below_ma5"]    = False
         out["d_trend_20d_up"] = False
+        out["d_breakout20"]   = False
         for n in [5, 10, 20]:
             out[f"d_touch{n}"] = False
             out[f"d_above{n}"] = False
@@ -545,6 +551,7 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
     d_sig_ma5       = False
     d_sig_ma10      = False
     d_sig_ma20      = False
+    d_breakout_ready = False  # 20日新高突破，下一根1H bar入场
     cash            = cfg.initial_capital
     trades: list[Trade] = []
     equity         = []
@@ -630,6 +637,9 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
         w_close_above_ma5 = bool(bar.get("w_close_above_ma5", False))
         w_trend_dn        = bool(bar.get("w_trend_dn",        False))
         mkt_regime        = bool(bar.get("mkt_regime",        True))
+        d_breakout20      = bool(bar.get("d_breakout20",      False))
+        # volatile_vol 是否突破 IS 震荡上轨（5%缓冲），突破后切趋势模式
+        grid_breakout     = (cfg.grid_upper > 0 and close > cfg.grid_upper * 1.05)
         # 入场门槛：大盘多头(SPY周线>MA20) + 个股周收盘站上MA5 + 周线未确认空头
         w_entry_gate      = mkt_regime and w_close_above_ma5 and not w_trend_dn
         any_trend_dn = d_trend_dn
@@ -741,23 +751,25 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                     swing_cnt       = 0
                     swing_ref_low   = 0.0
 
-            # ── d_ma：日线MA触及+次日确认，周线门槛（MA5>MA10且收盘站上MA5）才监测 ─
-            elif cfg.entry_signal == "d_ma" and cfg.stock_type != "volatile_vol":
+            # ── d_ma：日线MA触及+次日确认，或20日高点突破（并行入场）─────────
+            # volatile_vol 突破 IS 上轨（grid_breakout）时也走趋势路径
+            elif cfg.entry_signal == "d_ma" and (
+                    cfg.stock_type != "volatile_vol"
+                    or (mkt_regime and grid_breakout)):
                 if not w_entry_gate:
-                    # 周线门槛未满足：重置信号，不监测入场
+                    # 周线门槛未满足：重置所有信号
                     d_sig_count = 0
                     d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
+                    d_breakout_ready = False
                 else:
-                    # 周线行情启动：正常监测日线 K1/K2 入场信号
+                    # 周线行情启动：监测日线 K1/K2 信号 + 20日突破信号
                     if is_new_day:
                         if d_touch:
-                            # 日线 K1：低点触及均线且收盘站上 → 记录触发的MA
                             d_sig_count = 1
                             d_sig_ma5   = d_touch5
                             d_sig_ma10  = d_touch10
                             d_sig_ma20  = d_touch20
                         elif d_sig_count == 1:
-                            # 日线 K2：同MA确认收盘仍站上 → 信号成立
                             same_ma_ok = (
                                 (d_sig_ma5  and d_above5)  or
                                 (d_sig_ma10 and d_above10) or
@@ -771,19 +783,27 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                         else:
                             d_sig_count = 0
                             d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
+                        # 20日新高突破：当日收盘创20日新高 → 下一根1H bar入场
+                        d_breakout_ready = d_breakout20
 
-                    # 日线 K2 确认后直接建满仓
+                    # MA触及 K2 确认 → 入场
                     if d_sig_count == 2:
                         entry_triggered = True
                         which = "MA5" if d_sig_ma5 else ("MA10" if d_sig_ma10 else "MA20")
                         entry_reason    = f"周线启动+日线{which}触及确认"
                         d_sig_count = 0
                         d_sig_ma5 = d_sig_ma10 = d_sig_ma20 = False
+                        d_breakout_ready = False
+                    # 20日突破 → 入场（与MA触及互斥，优先MA触及）
+                    elif d_breakout_ready:
+                        entry_triggered  = True
+                        entry_reason     = "20日收盘新高突破入场"
+                        d_breakout_ready = False
 
-            # ── volatile_vol 网格入场：价格处于下檐附近区间才买 ────────────
-            elif cfg.entry_signal == "d_ma" and cfg.stock_type == "volatile_vol":
-                _grid_buy_lo = cfg.grid_lower * (1 - cfg.grid_band)   # 跌穿则不买
-                _grid_buy_hi = cfg.grid_lower * (1 + cfg.grid_band)   # 上限
+            # ── volatile_vol 网格：价格在 IS 震荡区间内时走网格 ────────────
+            elif cfg.entry_signal == "d_ma" and cfg.stock_type == "volatile_vol" and not grid_breakout:
+                _grid_buy_lo = cfg.grid_lower * (1 - cfg.grid_band)
+                _grid_buy_hi = cfg.grid_lower * (1 + cfg.grid_band)
                 if (cfg.grid_lower > 0
                         and _grid_buy_lo <= close <= _grid_buy_hi):
                     entry_triggered = True
@@ -997,8 +1017,8 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 ))
                 t_pos = Position(); t_day_count = 0
 
-        # ══ volatile_vol 网格：靠近上檐止盈，跌穿下檐止损 ══════════════════
-        if (core_pos.is_open and cfg.stock_type == "volatile_vol"
+        # ══ volatile_vol 网格：靠近上檐止盈，跌穿下檐止损（区间内才触发）══
+        if (core_pos.is_open and cfg.stock_type == "volatile_vol" and not grid_breakout
                 and cfg.entry_signal == "d_ma" and cfg.grid_upper > 0
                 and i > core_entry_bar):   # 防同 bar 建仓后即触发出场
             pnl = (close - core_pos.entry_price) / core_pos.entry_price
