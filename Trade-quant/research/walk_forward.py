@@ -52,7 +52,7 @@ class WFConfig:
     oos_months:  int = 2      # 样本外窗口（月）
     step_months: int = 1      # 每次滚动步进（月）
     data_start:  str = "2024-07-01"
-    data_end:    str = "2025-08-01"   # 六个窗口: W1=25-01~02 ... W6=25-06~07
+    data_end:    str = "2026-01-01"   # 六个窗口(step=2): W1=25-01~02 ... W6=25-11~25-12
     opt_metric:  str = "calmar"   # "calmar" | "return"
     min_trades:  int = 2          # 日线信号次数少，降低门槛
 

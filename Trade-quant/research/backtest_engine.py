@@ -459,6 +459,17 @@ class StrategyConfig:
     entry_signal: str = "h2_ma"
     atr_trail_mult: float = 2.5      # 吊灯追踪止损倍数（N×ATR from highest high）
     atr_trail_mult_vol: float = 3.5  # volatile_vol 专用倍数（波动大，止损需更宽松）
+    large_vol_exit: str = "trend_dn" # large_vol 出场模式："trend_dn"=自适应 | "none"=不主动止损（EOD）
+    # large_vol 自适应出场参数
+    large_vol_adx_parabolic: float = 35.0  # ADX≥此值 → 抛物线模式（双重确认才出场）
+    large_vol_adx_exit:      float = 28.0  # 抛物线模式：ADX回落到此值以下 → 趋势衰减
+    large_vol_profit_trail:  float = 0.25  # 抛物线模式：利润从峰值回撤此比例 → 出场
+    # 网格分批止盈
+    grid_tp1_frac:    float = 0.50   # 第一批止盈比例（靠近上轨卖出此比例）
+    grid_trail_pct:   float = 0.03   # 第一批后剩余仓位追踪止损幅度（峰值回撤%）
+    # d_ma/adx_atr 趋势入场分批建仓
+    d_ma_l1_frac:     float = 0.50   # 首次建仓比例（其余在后续 N 天补仓）
+    d_ma_batch_days:  int   = 3      # 补仓窗口（交易日数，约 N×8 根1H bar）
 
     @property
     def effective_core_mode(self) -> str:
@@ -547,7 +558,8 @@ def _compute_d_trend_up(bar, min_mas: int) -> bool:
     return ok and (ma60 > ma250)                          # 档位6
 
 
-def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd.Series]:
+def run_backtest(df: pd.DataFrame, cfg: StrategyConfig,
+                 classify_df: Optional[pd.DataFrame] = None) -> tuple[list[Trade], pd.Series]:
     """
     核心仓：日线多头(d_trend_min_mas档) + 2H K线双根确认建仓，建仓后不主动减仓。
     T仓：2H触及支撑信号 + MACD/KDJ/量能辅助确认入场；
@@ -583,6 +595,23 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
     atr_trail_sl       = 0.0   # 当前追踪止损线（0=未激活）
     atr_highest_high   = 0.0   # 持仓期间最高价（棘轮上移用）
     adx_entry_mode     = ""    # "trend" 或 "range"，区分止损逻辑
+    grid_tp1_done      = False  # 网格第一批止盈是否已触发
+    grid_trail_high    = 0.0    # 第一批止盈后追踪高点
+    core_pnl_peak      = 0.0    # large_vol 抛物线模式：持仓期最高浮盈（用于利润追踪保护）
+
+    # ── 动态分类：每天用过去30日数据重新判断股票类型 ─────────────────────────
+    # classify_df：可选，提供比 df 更早的历史数据供滚动回望（OOS前的IS尾部数据）
+    # _cur_stype  = 当日动态分类（每天更新，用于入场判断）
+    # _entry_stype = 建仓时锁定的分类（持仓期间不变，用于出场逻辑）
+    _clf_src = classify_df if classify_df is not None else df
+    _dyn_stype: dict = {}
+    _lookback_td = pd.Timedelta(days=30)
+    for _d in sorted({t2.normalize() for t2 in df.index}):
+        _win = _clf_src.loc[(_d - _lookback_td):_d]
+        _dyn_stype[_d.date()] = auto_classify(_win) if len(_win) >= 20 else cfg.stock_type
+    _cur_stype   = cfg.stock_type
+    _entry_stype = cfg.stock_type
+
     cash            = cfg.initial_capital
     trades: list[Trade] = []
     equity         = []
@@ -600,6 +629,9 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
         is_new_h2  = (prev_t is None) or (t.floor("2h") != prev_t.floor("2h"))
         is_new_day = (prev_t is None) or (t.floor("1D") != prev_t.floor("1D"))
         prev_t = t
+
+        if is_new_day:
+            _cur_stype = _dyn_stype.get(t.date(), cfg.stock_type)
 
         if pd.isna(bar["KDJ_J"]) or pd.isna(bar["VWAP"]):
             continue
@@ -645,7 +677,9 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
         if t_grid_cooldown > 0:
             t_grid_cooldown -= 1
 
-        vol_spike = vol_r > cfg.vol_mult
+        _cur_vol_mult = (cfg.small_vol_vol_mult if _cur_stype == "small_vol"
+                         else cfg.large_vol_vol_mult)
+        vol_spike = vol_r > _cur_vol_mult
         macd_pos  = (macd_l > 0) and (macd_h > 0)          # MACD 均在零轴上
         macd_xup  = (macd_h > 0) and (prev["MACD_hist"] <= 0)  # MACD hist 金叉
         j_ok      = j < 70                                   # KDJ 未超买
@@ -795,7 +829,7 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
             # ── d_ma：日线MA触及+次日确认，或20日高点突破（并行入场）─────────
             # volatile_vol 突破 IS 上轨（grid_breakout）时也走趋势路径
             elif cfg.entry_signal == "d_ma" and (
-                    cfg.stock_type != "volatile_vol"
+                    _cur_stype != "volatile_vol"
                     or grid_breakout):
                 # 突破上轨的个股不等SPY恢复，只需个股自身周线满足
                 _active_gate = w_entry_gate_breakout if grid_breakout else w_entry_gate
@@ -844,7 +878,7 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                         d_breakout_ready = False
 
             # ── volatile_vol 网格：价格在 IS 震荡区间内时走网格 ────────────
-            elif cfg.entry_signal == "d_ma" and cfg.stock_type == "volatile_vol" and not grid_breakout:
+            elif cfg.entry_signal == "d_ma" and _cur_stype == "volatile_vol" and not grid_breakout:
                 _grid_buy_lo = cfg.grid_lower * (1 - cfg.grid_band)
                 _grid_buy_hi = cfg.grid_lower * (1 + cfg.grid_band)
                 if (cfg.grid_lower > 0
@@ -940,9 +974,13 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 else:
                     # 首次建仓
                     if cfg.entry_signal in ("d_ma", "adx_atr"):
-                        buy_value = _full_value
+                        _is_grid_entry_now = "网格" in entry_reason
+                        # 趋势入场分批：首次只建 L1 比例，剩余在后续 N 天内补仓
+                        buy_value = (_full_value if _is_grid_entry_now
+                                     else _full_value * cfg.d_ma_l1_frac)
                         nxt_tgt   = 0.0
-                    elif cfg.effective_core_mode == "pyramid":
+                    elif (cfg.core_mode == "pyramid"
+                          or (cfg.core_mode == "auto" and _cur_stype == "large_vol")):
                         buy_value = _full_value * cfg.core_l1_frac
                         nxt_tgt   = close * (1 + cfg.core_pyramid_atr * max(atr, 0.01))
                     else:
@@ -950,6 +988,7 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                         nxt_tgt   = 0.0
                     buy_size = buy_value / close if buy_value > 0 else 0.0
                     if buy_value > 0 and cash >= buy_value:
+                        _entry_stype = _cur_stype  # 锁定建仓时的分类，持仓期间不再变化
                         core_pos  = Position(size=buy_size, entry_price=close, stop_pct=0.0,
                                              layers=1, prev_layer_price=0.0, pyramid_target=nxt_tgt)
                         cash             -= buy_value
@@ -969,7 +1008,7 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                             adx_entry_mode = "range" if _is_grid_entry else "trend"
                             # atr_trail_mult=0 时退化为原始d_ma行为（无追踪止损）
                             _eff_mult = (cfg.atr_trail_mult_vol
-                                         if cfg.stock_type == "volatile_vol"
+                                         if _entry_stype == "volatile_vol"
                                          else cfg.atr_trail_mult)
                             if not _is_grid_entry and _eff_mult > 0 and not pd.isna(d_atr_abs) and d_atr_abs > 0:
                                 atr_trail_sl     = close - _eff_mult * d_atr_abs
@@ -1001,9 +1040,33 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                     equity=cash + core_pos.size * close + t_pos.size * close,
                 ))
 
+        # ══ d_ma/adx_atr 批量补仓：趋势入场后 N 天内逐步填满（网格入场不补）
+        if (core_pos.is_open and cfg.entry_signal in ("d_ma", "adx_atr")
+                and adx_entry_mode == "trend"
+                and is_new_day and i > core_entry_bar):
+            _cur_val   = core_pos.size * close
+            _fill_need = _cur_val < _full_value * 0.90
+            _bars_since = i - core_entry_bar
+            _in_window  = _bars_since <= cfg.d_ma_batch_days * 8
+            if _fill_need and _in_window and d_trend_up and not d_below_ma5 and cash > 0:
+                add_val  = min(_full_value * 0.25, _full_value - _cur_val)
+                add_size = add_val / close if close > 0 else 0.0
+                if add_val > 0 and add_size > 0 and cash >= add_val:
+                    prev_cost            = core_pos.entry_price * core_pos.size
+                    core_pos.size       += add_size
+                    core_pos.entry_price = (prev_cost + close * add_size) / core_pos.size
+                    cash -= add_val
+                    trades.append(Trade(
+                        time=t, action="CORE_ADD", price=close, size=add_size,
+                        reason=(f"批量补仓 已建仓"
+                                f"{core_pos.size*close/_full_value*100:.0f}%"
+                                f" bar+{_bars_since}"),
+                        equity=cash + core_pos.size * close + t_pos.size * close,
+                    ))
+
         # ══ small_vol 专属止损 ══════════════════════════════════════════════
         # large_vol 不启用；adx_atr 模式使用ATR追踪止损，不走此路径
-        if core_pos.is_open and cfg.stock_type == "small_vol" and cfg.entry_signal != "adx_atr":
+        if core_pos.is_open and _entry_stype == "small_vol" and cfg.entry_signal != "adx_atr":
             core_hold_bars += 1
             core_pnl        = (close - core_pos.entry_price) / core_pos.entry_price
             portfolio_peak  = max(portfolio_peak, cur_equity)
@@ -1033,6 +1096,9 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 core_hold_bars    = 0
                 portfolio_peak    = 0.0
                 core_entry_equity = 0.0
+                grid_tp1_done     = False
+                grid_trail_high   = 0.0
+                core_pnl_peak     = 0.0
                 if t_pos.is_open:
                     t_pnl = (close - t_pos.entry_price) / t_pos.entry_price
                     cash += t_pos.size * close * (1 - cfg.commission_pct)
@@ -1087,6 +1153,9 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 core_hold_bars    = 0
                 portfolio_peak    = 0.0
                 core_entry_equity = 0.0
+                grid_tp1_done     = False
+                grid_trail_high   = 0.0
+                core_pnl_peak     = 0.0
                 if t_pos.is_open:
                     t_pnl = (close - t_pos.entry_price) / t_pos.entry_price
                     cash += t_pos.size * close * (1 - cfg.commission_pct)
@@ -1115,6 +1184,8 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
             core_hold_bars    = 0
             portfolio_peak    = 0.0
             core_entry_equity = 0.0
+            grid_tp1_done     = False
+            grid_trail_high   = 0.0
             if t_pos.is_open:
                 t_pnl = (close - t_pos.entry_price) / t_pos.entry_price
                 cash += t_pos.size * close * (1 - cfg.commission_pct)
@@ -1125,16 +1196,43 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 ))
                 t_pos = Position(); t_day_count = 0
 
-        # ══ volatile_vol 网格：靠近上檐止盈，跌穿下檐止损（区间内才触发）══
-        if (core_pos.is_open and cfg.stock_type == "volatile_vol" and not grid_breakout
+        # ══ volatile_vol 网格：分批止盈+追踪止损；跌穿下檐全清止损══════
+        if (core_pos.is_open and _entry_stype == "volatile_vol" and not grid_breakout
                 and cfg.entry_signal == "d_ma" and cfg.grid_upper > 0
-                and i > core_entry_bar):   # 防同 bar 建仓后即触发出场
+                and i > core_entry_bar):
             pnl = (close - core_pos.entry_price) / core_pos.entry_price
             _grid_exit_reason = None
-            if close >= cfg.grid_upper * (1 - cfg.grid_band):
-                _grid_exit_reason = f"网格上檐止盈 upper={cfg.grid_upper:.2f} pnl={pnl:.2%}"
-            elif close < cfg.grid_lower * (1 - cfg.grid_band):
+
+            # 止损：跌穿下檐 → 全清（无论是否已部分止盈）
+            if close < cfg.grid_lower * (1 - cfg.grid_band):
                 _grid_exit_reason = f"网格跌穿下檐止损 lower={cfg.grid_lower:.2f} pnl={pnl:.2%}"
+
+            # 第一批止盈：价格靠近上轨且未分批过
+            elif (not grid_tp1_done
+                  and close >= cfg.grid_upper * (1 - cfg.grid_band)
+                  and core_pos.size > 0):
+                sell_size = core_pos.size * cfg.grid_tp1_frac
+                net_tp1   = sell_size * close * (1 - cfg.commission_pct)
+                cash     += net_tp1
+                core_pos.size   -= sell_size
+                grid_tp1_done    = True
+                grid_trail_high  = close
+                trades.append(Trade(
+                    time=t, action="CORE_TP1", price=close, size=sell_size,
+                    reason=(f"网格分批止盈{cfg.grid_tp1_frac:.0%}"
+                            f" upper={cfg.grid_upper:.2f} pnl={pnl:.2%}"),
+                    pnl_pct=pnl,
+                    equity=cash + core_pos.size * close + t_pos.size * close,
+                ))
+
+            # 追踪止损：第一批已止盈，剩余仓位跟踪新高
+            elif grid_tp1_done:
+                grid_trail_high = max(grid_trail_high, close)
+                _trail_sl = grid_trail_high * (1 - cfg.grid_trail_pct)
+                if close < _trail_sl:
+                    _grid_exit_reason = (f"网格追踪止损 peak={grid_trail_high:.2f}"
+                                         f" trail_sl={_trail_sl:.2f} pnl={pnl:.2%}")
+
             if _grid_exit_reason:
                 net   = core_pos.size * close * (1 - cfg.commission_pct)
                 cash += net
@@ -1150,17 +1248,49 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 core_hold_bars    = 0
                 portfolio_peak    = 0.0
                 core_entry_equity = 0.0
+                grid_tp1_done     = False
+                grid_trail_high   = 0.0
+                core_pnl_peak     = 0.0
 
-        # ══ ATR 吊灯止损（d_ma趋势 + adx_atr趋势均适用；atr_trail_sl>0表示激活）
-        # 震荡/网格入场不走此路径（atr_trail_sl=0），仍用网格上下轨出场
+        # ══ 趋势出场（d_ma趋势 + adx_atr趋势）
+        # large_vol：单边趋势不用ATR，日线MA5跌破才出场（避免震荡被踢出主升浪）
+        # small_vol / volatile_vol：ATR吊灯追踪止损（已激活时 atr_trail_sl>0）
+        # 网格入场不走此路径（adx_entry_mode=="range"，走上面的网格出场块）
         if core_pos.is_open and cfg.entry_signal in ("d_ma", "adx_atr") and i > core_entry_bar:
             _adx_stop_reason = None
             pnl = (close - core_pos.entry_price) / core_pos.entry_price
 
-            if adx_entry_mode == "trend" and atr_trail_sl > 0:
-                # 趋势模式：吊灯追踪止损
+            if adx_entry_mode == "trend" and _entry_stype == "large_vol":
+                # large_vol 自适应出场（large_vol_exit="none" 时跳过所有主动出场）
+                if cfg.large_vol_exit == "trend_dn" and is_new_day:
+                    # 更新持仓期峰值浮盈
+                    core_pnl_peak = max(core_pnl_peak, pnl)
+
+                    _is_parabolic = _adx_valid and d_adx_val >= cfg.large_vol_adx_parabolic
+                    if _is_parabolic:
+                        # ── 抛物线模式（ADX≥35）：双重确认才出场 ────────────────
+                        # 条件1：ADX 明显回落（趋势动能衰减）
+                        _adx_fading  = _adx_valid and d_adx_val < cfg.large_vol_adx_exit
+                        # 条件2：利润从峰值回撤超过 large_vol_profit_trail
+                        _profit_back = (core_pnl_peak >= 0.10
+                                        and pnl < core_pnl_peak * (1 - cfg.large_vol_profit_trail))
+                        if d_trend_dn and (_adx_fading or _profit_back):
+                            _adx_stop_reason = (
+                                f"large_vol 抛物线终结 ADX={d_adx_val:.0f}"
+                                f" peak={core_pnl_peak:.2%} pnl={pnl:.2%}"
+                            )
+                    else:
+                        # ── 普通趋势（ADX<35）：d_trend_dn 即出场 ───────────────
+                        if d_trend_dn:
+                            _adx_stop_reason = (
+                                f"large_vol 趋势转弱(MA5<MA10↓ ADX={d_adx_val:.0f})"
+                                f" pnl={pnl:.2%}"
+                            )
+
+            elif adx_entry_mode == "trend" and atr_trail_sl > 0:
+                # small_vol / volatile_vol：ATR吊灯追踪止损
                 _eff_mult = (cfg.atr_trail_mult_vol
-                             if cfg.stock_type == "volatile_vol"
+                             if _entry_stype == "volatile_vol"
                              else cfg.atr_trail_mult)
                 bar_high = float(bar.get("high", close))
                 atr_highest_high = max(atr_highest_high, bar_high)
@@ -1197,6 +1327,9 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 atr_trail_sl     = 0.0
                 atr_highest_high = 0.0
                 adx_entry_mode   = ""
+                grid_tp1_done    = False
+                grid_trail_high  = 0.0
+                core_pnl_peak    = 0.0
 
         # ══ T仓管理（核心仓不存在时跳过）══════════════════════════════════
         if not core_pos.is_open:
@@ -1254,7 +1387,7 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 ))
                 t_pos = Position()
                 t_h2_below_cnt = 0
-                if cfg.stock_type == "volatile_vol":
+                if _entry_stype == "volatile_vol":
                     t_grid_cooldown = cfg.grid_cooldown_bars
                 continue
 
@@ -1271,7 +1404,7 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
                 ))
                 t_pos = Position()
                 t_h2_below_cnt = 0
-                if cfg.stock_type == "volatile_vol":
+                if _entry_stype == "volatile_vol":
                     t_grid_cooldown = cfg.grid_cooldown_bars
                 continue
 
@@ -1324,7 +1457,7 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig) -> tuple[list[Trade], pd
         if cash < buy_value + comm:
             continue
 
-        if cfg.stock_type == "volatile_vol":
+        if _cur_stype == "volatile_vol":
             continue   # 震荡股暂不做T，跳过动量T逻辑
 
         if trend != "up" or not above_vwap or not atr_ok:

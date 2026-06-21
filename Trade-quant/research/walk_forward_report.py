@@ -103,8 +103,11 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 
                                  grid_upper=g_up, grid_lower=g_lo,
                                  entry_signal="d_ma",
                                  d_trend_min_mas=d_trend_min_mas)
+            # classify_df：OOS前35天IS数据+OOS，供滚动30日分类回望
+            _clf_start = (pd.Timestamp(oos_s) - pd.Timedelta(days=35)).strftime("%Y-%m-%d")
+            classify_df = df_full.loc[_clf_start:oos_e]
             try:
-                trades, eq_series = run_backtest(df_oos, cfg)
+                trades, eq_series = run_backtest(df_oos, cfg, classify_df=classify_df)
             except Exception as e:
                 print(f"    {sym} 回测失败: {e}", flush=True)
                 continue
@@ -113,13 +116,17 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 
             hold_start = df_oos["close"].iloc[0]
             hold_ret   = (df_oos["close"].iloc[-1] / hold_start - 1) * cfg.core_pct * 100
 
+            # 初始化（处理无成交情况时也保证变量已定义）
+            t_buys = t_exits = t_exits_strat = t_exits_eod = t_pnls = []
+            t_wr = 0.0
+            core_exits_eod = core_exits_strat = []
+
             if not trades:
                 # 无入场信号：净值保持 100，α = -hold_ret（没拿到涨幅就是机会成本）
                 strat_ret = 0.0
                 alpha     = strat_ret - hold_ret
                 strat_mdd = 0.0
                 eq_series = pd.Series(ini, index=df_oos.index)
-                t_buys, t_exits, t_pnls, t_wr = [], [], [], 0.0
             else:
                 # ── 指标 ──────────────────────────────────────────────────
                 strat_ret = (trades[-1].equity / ini - 1) * 100
@@ -127,10 +134,16 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 
                 dd        = (eq_series - eq_series.cummax()) / eq_series.cummax() * 100
                 strat_mdd = round(float(dd.min()), 1)
 
-                t_buys  = [t for t in trades if t.action == "T_BUY"]
-                t_exits = [t for t in trades if t.action in ("T_TP", "T_STOP", "T_EOD")]
-                t_pnls  = [t.pnl_pct for t in t_exits if t.pnl_pct is not None]
+                t_buys       = [t for t in trades if t.action == "T_BUY"]
+                # 策略触发 vs 窗口结束强平 — 分开统计，EOD 不计入胜率
+                t_exits_strat = [t for t in trades if t.action in ("T_TP", "T_STOP")]
+                t_exits_eod   = [t for t in trades if t.action == "T_EOD"]
+                t_exits       = t_exits_strat + t_exits_eod  # backward-compat
+                t_pnls  = [t.pnl_pct for t in t_exits_strat if t.pnl_pct is not None]
                 t_wr    = (sum(1 for p in t_pnls if p > 0) / len(t_pnls) * 100) if t_pnls else 0
+                core_exits_eod   = [t for t in trades if t.action == "CORE_EOD"]
+                core_exits_strat = [t for t in trades
+                                    if t.action in ("CORE_STOP", "CORE_CUT", "CORE_TP1")]
 
             # ── 日K OHLCV (IS背景 + OOS) ──────────────────────────────────
             oob_ts   = _ts(oos_s)
@@ -218,11 +231,12 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 
 
             # ── 交易标记 ──────────────────────────────────────────────────
             BUY_ACTIONS  = {"CORE_BUY", "CORE_ADD", "T_BUY", "T_ADD"}
-            SELL_ACTIONS = {"CORE_STOP", "CORE_CUT", "CORE_EOD", "T_TP", "T_STOP", "T_EOD"}
+            SELL_ACTIONS = {"CORE_STOP", "CORE_CUT", "CORE_EOD", "CORE_TP1",
+                            "T_TP", "T_STOP", "T_EOD"}
             LABEL_MAP    = {
                 "CORE_BUY": "C↑", "CORE_ADD": "C+",
                 "T_BUY": "T↑", "T_ADD": "T+",
-                "CORE_STOP": "CS", "CORE_CUT": "C-", "CORE_EOD": "CE",
+                "CORE_STOP": "CS", "CORE_CUT": "C-", "CORE_EOD": "CE", "CORE_TP1": "CT",
                 "T_TP": "TP", "T_STOP": "TS", "T_EOD": "TE",
             }
 
@@ -261,14 +275,16 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 
                     "reason": tr.reason[:60],
                 })
 
-            # ── 对比跑：d_ma 原始版（无ATR止损，atr_trail_mult=0）────────────
+            # ── 对比基准：无任何主动止损（large_vol=none，其余=atr_trail=0）────
+            # 展示"纯持有到EOD"的收益，与策略止损版形成对比
             cfg_orig = StrategyConfig(stock_type=stype, core_mode="auto",
                                       grid_upper=g_up, grid_lower=g_lo,
                                       entry_signal="d_ma", atr_trail_mult=0.0,
                                       atr_trail_mult_vol=0.0,
+                                      large_vol_exit="none",
                                       d_trend_min_mas=d_trend_min_mas)
             try:
-                orig_trades, _ = run_backtest(df_oos, cfg_orig)
+                orig_trades, _ = run_backtest(df_oos, cfg_orig, classify_df=classify_df)
                 orig_ret = (orig_trades[-1].equity / cfg_orig.initial_capital - 1) * 100 if orig_trades else 0.0
                 orig_alpha = orig_ret - hold_ret
             except Exception:
@@ -285,6 +301,11 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 
                     "t_winrate":    round(t_wr, 0),
                     "orig_return":  round(orig_ret,  1),
                     "orig_alpha":   round(orig_alpha, 1),
+                    # EOD 强平分类
+                    "eod_core":     len(core_exits_eod),
+                    "eod_t":        len(t_exits_eod),
+                    "strat_core_exits": len(core_exits_strat),
+                    "strat_t_exits":    len(t_exits_strat),
                 },
                 "ohlcv":        ohlcv,
                 "ma5":          ma5,
@@ -310,8 +331,8 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 
             print(
                 f"    {sym:6s}[{stype[:3]}] "
                 f"hold={hold_ret:+5.1f}% │ "
-                f"d_ma原始={orig_ret:+6.1f}%(α{orig_alpha:+5.1f}%) │ "
-                f"d_ma+ATR={strat_ret:+6.1f}%(α{alpha:+5.1f}%)"
+                f"无主动止损={orig_ret:+6.1f}%(α{orig_alpha:+5.1f}%) │ "
+                f"d_ma+exit={strat_ret:+6.1f}%(α{alpha:+5.1f}%)"
                 f"{no_trade_tag}", flush=True)
 
         all_windows.append({
@@ -524,7 +545,7 @@ function buildUI() {
         let cls = 'act-core';
         if (tr.action.startsWith('T_'))    cls = tr.action==='T_TP'||tr.action==='T_STOP'?'act-sell':'act-buy';
         else if (tr.action==='CORE_BUY'||tr.action==='CORE_ADD') cls='act-buy';
-        else if (tr.action==='CORE_STOP'||tr.action==='CORE_EOD') cls='act-sell';
+        else if (tr.action==='CORE_STOP'||tr.action==='CORE_EOD'||tr.action==='CORE_TP1') cls='act-sell';
         return `<tr><td>${tr.time}</td><td class="${cls}">${tr.action}</td>
           <td>${tr.price}</td><td class="${tr.pnl.startsWith('+') ?'pos':'neg'}">${tr.pnl}</td>
           <td style="color:#8892a4;max-width:300px;overflow:hidden">${tr.reason}</td></tr>`;
@@ -565,7 +586,7 @@ function buildUI() {
                   <div class="met-row"><span class="met-lbl">α</span><span class="met-val ${oaCls}">${oa>=0?'+':''}${oa}%</span></div>`;})()}
               </div>
               <div style="margin-top:6px;padding-top:6px;border-top:1px solid #2d3748">
-                <div style="font-size:10px;color:#8892a4;margin-bottom:3px">② d_ma+ATR止损</div>
+                <div style="font-size:10px;color:#8892a4;margin-bottom:3px">② d_ma+exit(large=MA5/其余=ATR)</div>
                 <div class="met-row"><span class="met-lbl">收益</span>
                   <span class="met-val ${retCls}">${m.strat_return>=0?'+':''}${m.strat_return}%</span></div>
                 <div class="met-row"><span class="met-lbl">α</span>
@@ -574,11 +595,17 @@ function buildUI() {
                   <span class="met-val ${mddCls}">${m.strat_mdd}%</span></div>
               </div>
               <div style="margin-top:10px">
-                <span class="badge ${badgeCls}">${m.alpha>=0?'ATR有效':'不如持有'}</span>
+                <span class="badge ${badgeCls}">${m.alpha>=0?'止损有效':'不如持有'}</span>
               </div>
               <div style="margin-top:8px;font-size:11px;color:#8892a4;line-height:1.5">
                 IS 分类<br><span style="color:#c9d1e0">${stypeLabel}</span>
               </div>
+              ${(()=>{const ec=m.eod_core||0,et=m.eod_t||0,sc=m.strat_core_exits||0,st=m.strat_t_exits||0;
+                if(ec+et===0) return '';
+                return `<div style="margin-top:8px;padding-top:6px;border-top:1px solid #2d3748;font-size:10px;color:#8892a4;line-height:1.8">
+                  策略触发出场 <span style="color:#c9d1e0">${sc}核${st>0?' '+st+'T':''}</span><br>
+                  窗口强平(EOD) <span style="color:#fbbf24">${ec}核${et>0?' '+et+'T':''}</span>
+                </div>`; })()}
             </div>
           </div>
         </div>
@@ -753,7 +780,7 @@ function createKlineChart(containerId, sd) {
   el.appendChild(tooltip);
 
   const BUY_ACTIONS  = new Set(['CORE_BUY','CORE_ADD','T_BUY','T_ADD']);
-  const SELL_ACTIONS = new Set(['CORE_STOP','CORE_CUT','CORE_EOD','T_TP','T_STOP','T_EOD']);
+  const SELL_ACTIONS = new Set(['CORE_STOP','CORE_CUT','CORE_EOD','CORE_TP1','T_TP','T_STOP','T_EOD']);
 
   chart.subscribeCrosshairMove(param => {
     if (!param.time || !param.point) { tooltip.style.display = 'none'; return; }
