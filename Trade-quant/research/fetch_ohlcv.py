@@ -6,12 +6,14 @@
     python fetch_ohlcv.py --symbols NVDA TSLA SPY      # 自定义标的
     python fetch_ohlcv.py --symbols NVDA --tf 1h       # 1小时粒度
     python fetch_ohlcv.py --since 2022-01-01           # 自定义起始日期
+    python fetch_ohlcv.py --universe                   # 下载 universe.json 全部股票
 
 支持的 interval: 1m/2m/5m/15m/30m/60m/90m/1h/1d/5d/1wk/1mo/3mo
 注意：yfinance 对分钟级数据有 60天/730天历史限制。
 """
 import argparse
-from datetime import datetime, timedelta
+import json
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -56,24 +58,49 @@ def save(df: pd.DataFrame, symbol: str, interval: str) -> Path:
     return path
 
 
+def load_universe_symbols() -> list[str]:
+    universe_path = DATA_DIR / "universe.json"
+    if not universe_path.exists():
+        raise FileNotFoundError("找不到 universe.json，请先运行 build_universe.py")
+    with open(universe_path, encoding="utf-8") as f:
+        u = json.load(f)
+    return u["symbols"] + u["benchmarks"]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Yahoo Finance OHLCV downloader")
-    parser.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS)
-    parser.add_argument("--tf", default="1d", help="interval: 1d/1h/15m etc.")
-    parser.add_argument("--since", default=DEFAULT_SINCE, help="YYYY-MM-DD")
-    parser.add_argument("--until", default=None, help="YYYY-MM-DD (default: today)")
+    parser.add_argument("--symbols",   nargs="+", default=None)
+    parser.add_argument("--universe",  action="store_true", help="下载 universe.json 全部股票+基准")
+    parser.add_argument("--tf",        default="1d", help="interval: 1d/1h/15m etc.")
+    parser.add_argument("--since",     default=DEFAULT_SINCE, help="YYYY-MM-DD")
+    parser.add_argument("--until",     default=None, help="YYYY-MM-DD (default: today)")
     args = parser.parse_args()
 
-    until = args.until or datetime.today().strftime("%Y-%m-%d")
+    if args.universe:
+        symbols = load_universe_symbols()
+        print(f"从 universe.json 加载 {len(symbols)} 个标的")
+    else:
+        symbols = args.symbols or DEFAULT_SYMBOLS
 
-    for sym in args.symbols:
-        print(f"下载 {sym} {args.tf} from {args.since} to {until} ...")
+    until = args.until or datetime.today().strftime("%Y-%m-%d")
+    ok, fail = 0, []
+
+    for i, sym in enumerate(symbols, 1):
+        prefix = f"[{i:3d}/{len(symbols)}]" if len(symbols) > 5 else ""
+        print(f"{prefix} 下载 {sym} {args.tf} ...")
         try:
             df = fetch_symbol(sym, args.tf, args.since, until)
             path = save(df, sym, args.tf)
             print(f"  ✓ {len(df)} 行  {df.index[0].date()} ~ {df.index[-1].date()}  → {path.name}")
+            ok += 1
         except Exception as e:
             print(f"  ✗ {sym} 失败: {e}")
+            fail.append(sym)
+
+    if len(symbols) > 5:
+        print(f"\n完成: 成功 {ok} 只，失败 {len(fail)} 只")
+        if fail:
+            print(f"失败列表: {fail}")
 
 
 if __name__ == "__main__":
