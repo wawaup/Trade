@@ -399,33 +399,49 @@ def generate_html_report(
     * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
            margin: 0; background: #f0f2f5; color: #212529; }
-    /* 整体两栏布局 */
-    .page-wrap { display: flex; min-height: 100vh; }
-    .main { flex: 1; min-width: 0; padding: 28px 32px; max-width: 900px; }
-    .sidebar { width: 280px; flex-shrink: 0; background: #fff;
-               border-left: 1px solid #e0e0e0; padding: 24px 18px;
-               position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+    /* 主内容区：左右各留 210px / 270px 避开两侧固定面板 */
+    .main { margin-left: 210px; margin-right: 270px;
+            padding: 28px 32px; min-width: 0; }
+    /* 左侧固定面板：颜色速查 */
+    .left-panel { position: fixed; left: 0; top: 0; bottom: 0; width: 200px;
+                  background: rgba(26,26,46,0.93); color: #fff;
+                  padding: 18px 14px; overflow-y: auto; z-index: 100;
+                  font-size: 0.8em; line-height: 1.5; }
+    .left-panel .panel-title { font-weight: 700; font-size: 1em;
+                                border-bottom: 1px solid rgba(255,255,255,.25);
+                                padding-bottom: 8px; margin-bottom: 10px; }
+    .fl-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+    .fl-dot { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+    .fl-star { color: #ffa726; }
+    .left-panel .note-sm { margin-top: 12px; border-top: 1px solid rgba(255,255,255,.2);
+                            padding-top: 10px; font-size: 0.9em; color: #ccc; }
+    /* 右侧固定面板：解读指南 */
+    .right-panel { position: fixed; right: 0; top: 0; bottom: 0; width: 260px;
+                   background: #fff; border-left: 1px solid #dde;
+                   padding: 18px 14px; overflow-y: auto; z-index: 100;
+                   font-size: 0.81em; }
+    .right-panel h3 { color: #1a1a2e; font-size: 0.95em; margin-top: 0;
+                      border-bottom: 2px solid #4361ee; padding-bottom: 6px; }
+    .right-panel h4 { color: #4361ee; font-size: 0.85em; margin: 14px 0 5px; }
+    /* 标题 */
     h1 { color: #1a1a2e; border-bottom: 3px solid #4361ee;
-         padding-bottom: 10px; margin-top: 0; font-size: 1.5em; }
-    h2 { color: #1a1a2e; margin-top: 44px; font-size: 1.1em;
+         padding-bottom: 10px; margin-top: 0; font-size: 1.4em; }
+    h2 { color: #1a1a2e; margin-top: 40px; font-size: 1.05em;
          border-left: 4px solid #4361ee; padding-left: 12px; }
-    .sidebar h3 { color: #1a1a2e; font-size: 1em; margin-top: 0;
-                  border-bottom: 2px solid #4361ee; padding-bottom: 6px; }
-    .sidebar h4 { color: #4361ee; font-size: 0.9em; margin: 16px 0 6px; }
     /* 顶部元信息 */
-    .meta { background: #fff; border-radius: 10px; padding: 16px 20px;
-            display: flex; flex-wrap: wrap; gap: 20px;
-            box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 8px; }
-    .meta-item { text-align: center; min-width: 90px; }
-    .meta-item .val { font-size: 1.5em; font-weight: 700; color: #4361ee; }
-    .meta-item .lbl { font-size: 0.78em; color: #888; margin-top: 2px; }
+    .meta { background: #fff; border-radius: 10px; padding: 14px 18px;
+            display: flex; flex-wrap: wrap; gap: 18px;
+            box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 6px; }
+    .meta-item { text-align: center; min-width: 80px; }
+    .meta-item .val { font-size: 1.35em; font-weight: 700; color: #4361ee; }
+    .meta-item .lbl { font-size: 0.76em; color: #888; margin-top: 2px; }
     /* 表格 */
-    table { border-collapse: collapse; width: 100%; margin: 12px 0;
+    table { border-collapse: collapse; width: 100%; margin: 10px 0;
             background: #fff; border-radius: 10px; overflow: hidden;
-            box-shadow: 0 1px 4px rgba(0,0,0,.08); font-size: 0.88em; }
-    th { background: #1a1a2e; color: #fff; padding: 9px 12px;
+            box-shadow: 0 1px 4px rgba(0,0,0,.08); font-size: 0.87em; }
+    th { background: #1a1a2e; color: #fff; padding: 8px 10px;
          text-align: center; white-space: pre-line; line-height: 1.4; }
-    td { padding: 7px 12px; text-align: center; border-bottom: 1px solid #f0f0f0; }
+    td { padding: 7px 10px; text-align: center; border-bottom: 1px solid #f0f0f0; }
     tr:last-child td { border-bottom: none; }
     td.fn { text-align: left; font-weight: 600; font-family: monospace;
             white-space: nowrap; }
@@ -434,30 +450,13 @@ def generate_html_report(
           box-shadow: 0 2px 10px rgba(0,0,0,.12); margin: 6px 0; }
     /* 备注框 */
     .note { background: #e8f4fd; border-left: 4px solid #4361ee;
-            padding: 11px 14px; border-radius: 0 8px 8px 0;
-            margin: 12px 0; font-size: 0.88em; line-height: 1.7; }
+            padding: 10px 14px; border-radius: 0 8px 8px 0;
+            margin: 10px 0; font-size: 0.87em; line-height: 1.7; }
     .note b { color: #1a1a2e; }
-    .sub { font-size: 0.8em; color: #777; margin: 4px 0 12px; }
-    /* 侧边栏图例行 */
-    .leg-row { display: flex; align-items: center; gap: 8px;
-               margin: 5px 0; font-size: 0.83em; line-height: 1.4; }
-    .leg-dot { width: 16px; height: 16px; border-radius: 4px; flex-shrink: 0; }
-    .leg-star { color: #e65100; font-weight: bold; font-size: 1em; }
-    /* 侧边栏术语 */
-    .term { margin: 6px 0; font-size: 0.83em; line-height: 1.5; }
-    .term b { color: #1a1a2e; display: block; margin-bottom: 2px; }
-    /* 固定浮窗 */
-    .float-legend { position: fixed; bottom: 22px; right: 22px; z-index: 999;
-                    background: rgba(26,26,46,0.93); color: #fff;
-                    border-radius: 10px; padding: 12px 16px; width: 230px;
-                    font-size: 0.8em; box-shadow: 0 4px 16px rgba(0,0,0,.3);
-                    line-height: 1.5; }
-    .float-legend .fl-title { font-weight: 700; font-size: 0.9em;
-                               border-bottom: 1px solid rgba(255,255,255,.2);
-                               padding-bottom: 6px; margin-bottom: 8px; }
-    .fl-row { display: flex; align-items: center; gap: 7px; margin: 4px 0; }
-    .fl-dot { width: 13px; height: 13px; border-radius: 3px; flex-shrink: 0; }
-    .fl-star { color: #ffa726; }
+    .sub { font-size: 0.79em; color: #777; margin: 3px 0 10px; }
+    /* 右侧面板术语 */
+    .term { margin: 5px 0; font-size: 0.88em; line-height: 1.5; }
+    .term b { color: #1a1a2e; display: block; margin-bottom: 1px; }
     """
 
     # ── 表格生成函数 ──────────────────────────────────────────────────────────
@@ -502,66 +501,10 @@ def generate_html_report(
             rows += f"<tr>{row}</tr>"
         return f'<table><thead><tr><th>因子</th>{cols}</tr></thead><tbody>{rows}</tbody></table>'
 
-    # ── 侧边栏内容 ────────────────────────────────────────────────────────────
-    sidebar = """
-    <div class="sidebar">
-      <h3>📖 评判标准与解读</h3>
-
-      <h4>有效因子双重标准</h4>
-      <div class="term">
-        <b>|IC 均值| &gt; 0.03</b>
-        因子对未来涨跌有预测能力。IC = 0 意味着完全随机，>0.03 才有统计意义。
-      </div>
-      <div class="term">
-        <b>|ICIR| &gt; 0.5</b>
-        因子表现稳定，不靠某次偶发暴涨拉高均值。ICIR = IC均值 ÷ IC标准差，类似夏普比率。
-      </div>
-
-      <h4>术语速查</h4>
-      <div class="term">
-        <b>IC（信息系数）</b>
-        当天所有股票的因子值排名 vs 未来涨跌排名 的相关系数。+1=完美预测涨跌，-1=完美反向，0=无效。
-      </div>
-      <div class="term">
-        <b>ICIR（IC信息比率）</b>
-        IC的稳定性得分。越高说明因子越可靠，不是靠运气。
-      </div>
-      <div class="term">
-        <b>持仓X天（fwd_Xd）</b>
-        买入信号出现后，持有X个交易日的累计涨跌幅。例如"持仓5天"= 买入后一周的收益率。
-      </div>
-      <div class="term">
-        <b>正向因子</b>
-        因子值越大，预期未来涨幅越大（追涨动量逻辑）。
-      </div>
-      <div class="term">
-        <b>负向因子</b>
-        因子值越大，预期未来跌幅越大（均值回归逻辑）。负向因子同样有用，只需反向使用。
-      </div>
-
-      <h4>各因子简介</h4>
-      <div class="term"><b>Ret_5</b>过去5日涨跌幅（短期动量）</div>
-      <div class="term"><b>Ret_20</b>过去20日涨跌幅（月度动量，学术主流窗口）</div>
-      <div class="term"><b>BIAS_20</b>股价偏离20日均线的程度（乖离率，反转因子）</div>
-      <div class="term"><b>VPT_slope</b>量价趋势因子5日变化，捕捉机构吸筹/出货</div>
-      <div class="term"><b>HV_ratio</b>短期波动率÷长期波动率，>1表示近期异动</div>
-      <div class="term"><b>RS_QQQ</b>个股收益 - QQQ收益，剔除大盘影响后的独立强度</div>
-
-      <h4>市场分期（背景色）</h4>
-      <div class="term" style="font-size:0.8em">
-        🔴 熊市(2022)：SPY -23.8%<br>
-        🟠 反弹(22Q4)：熊末反弹<br>
-        🟢 AI牛市(23-24)：两年强牛<br>
-        🟠 关税震荡(25H1)：-17%冲击<br>
-        🔵 复苏(25H2+)：持续新高
-      </div>
-    </div>
-    """
-
-    # ── 固定浮窗图例 ──────────────────────────────────────────────────────────
-    float_legend = """
-    <div class="float-legend">
-      <div class="fl-title">颜色含义速查</div>
+    # ── 左侧固定面板：颜色速查 ───────────────────────────────────────────────
+    left_panel = """
+    <div class="left-panel">
+      <div class="panel-title">🎨 颜色含义速查</div>
       <div class="fl-row"><div class="fl-dot" style="background:#4caf50"></div>
         强有效·正向（动量）</div>
       <div class="fl-row"><div class="fl-dot" style="background:#f44336"></div>
@@ -570,14 +513,70 @@ def generate_html_report(
         弱有效·正向</div>
       <div class="fl-row"><div class="fl-dot" style="background:#ef9a9a"></div>
         弱有效·负向</div>
-      <div class="fl-row"><div class="fl-dot" style="background:#fffde7;border:1px solid #ccc"></div>
+      <div class="fl-row">
+        <div class="fl-dot" style="background:#fffde7;border:1px solid #aaa"></div>
         微弱信号</div>
       <div class="fl-row"><div class="fl-dot" style="background:#e0e0e0"></div>
         噪音·无意义</div>
-      <div style="margin-top:8px;border-top:1px solid rgba(255,255,255,.2);
-                  padding-top:6px;font-size:0.85em">
-        <span class="fl-star">★</span> = ICIR ≥ 0.5（稳定有效）<br>
-        标准：|IC|&gt;0.03 且 |ICIR|&gt;0.5
+      <div class="note-sm">
+        <span class="fl-star">★</span> = ICIR ≥ 0.5<br>（表现稳定，非偶然）<br><br>
+        有效标准：<br>
+        |IC| &gt; 0.03<br>
+        且 |ICIR| &gt; 0.5
+      </div>
+    </div>
+    """
+
+    # ── 右侧固定面板：解读指南 ───────────────────────────────────────────────
+    right_panel = """
+    <div class="right-panel">
+      <h3>📖 评判标准与解读</h3>
+
+      <h4>有效因子双重标准</h4>
+      <div class="term">
+        <b>|IC 均值| &gt; 0.03</b>
+        因子对未来涨跌有预测能力。IC=0 完全随机，>0.03 才有统计意义。
+      </div>
+      <div class="term">
+        <b>|ICIR| &gt; 0.5</b>
+        因子表现稳定，不靠偶发暴涨拉高均值。ICIR = IC均值 ÷ IC标准差，类似夏普比率。
+      </div>
+
+      <h4>术语速查</h4>
+      <div class="term">
+        <b>IC（信息系数）</b>
+        当天所有股票「因子值排名」vs「未来涨跌排名」的相关系数。+1=完美预测，-1=完美反向，0=无效。
+      </div>
+      <div class="term">
+        <b>ICIR（IC信息比率）</b>
+        IC的稳定性得分。越高说明因子越可靠，非靠运气。
+      </div>
+      <div class="term">
+        <b>持仓X天</b>
+        买入后持有X个交易日的累计涨跌幅。"持仓5天"= 买后约一周的收益率。
+      </div>
+      <div class="term">
+        <b>正向因子</b>因子值越大→预期未来涨幅越大（动量逻辑）
+      </div>
+      <div class="term">
+        <b>负向因子</b>因子值越大→预期未来跌幅越大（反转逻辑），反向使用同样有效
+      </div>
+
+      <h4>各因子简介</h4>
+      <div class="term"><b>Ret_5</b>过去5日涨跌幅（短期动量）</div>
+      <div class="term"><b>Ret_20</b>过去20日涨跌幅（月度动量）</div>
+      <div class="term"><b>BIAS_20</b>股价偏离20日均线（乖离率，反转因子）</div>
+      <div class="term"><b>VPT_slope</b>量价趋势5日斜率（机构吸筹/出货）</div>
+      <div class="term"><b>HV_ratio</b>短期÷长期波动率（近期异动程度）</div>
+      <div class="term"><b>RS_QQQ</b>个股超额收益 vs QQQ（剔除大盘干扰）</div>
+
+      <h4>市场分期（背景色）</h4>
+      <div class="term" style="line-height:1.8">
+        🔴 熊市(2022)：SPY -23.8%<br>
+        🟠 反弹(22Q4)：熊末反弹<br>
+        🟢 AI牛市(23-24)：两年强牛<br>
+        🟠 关税震荡(25H1)：-17%冲击<br>
+        🔵 复苏(25H2+)：持续新高
       </div>
     </div>
     """
@@ -603,47 +602,44 @@ def generate_html_report(
   <style>{css}</style>
 </head>
 <body>
-<div class="page-wrap">
 
-  <!-- ── 主内容区 ── -->
-  <div class="main">
-    <h1>📊 因子 IC 分析报告</h1>
-    <div class="meta">
-      <div class="meta-item"><div class="val">{n_stocks}</div><div class="lbl">有效股票</div></div>
-      <div class="meta-item"><div class="val">{since}</div><div class="lbl">数据起始</div></div>
-      <div class="meta-item"><div class="val">{liquid_pct:.1f}%</div><div class="lbl">流动性达标</div></div>
-      <div class="meta-item"><div class="val">{len(factor_names)}</div><div class="lbl">测试因子</div></div>
-      <div class="meta-item"><div class="val">{now}</div><div class="lbl">生成时间</div></div>
-    </div>
+<!-- ── 左侧固定面板：颜色速查 ── -->
+{left_panel}
 
-    <h2>1. 全局 IC 均值热力图</h2>
-    <p class="sub">横轴 = 买入后持仓多少天；纵轴 = 因子名称；数值越偏离 0 颜色越深</p>
-    <img src="data:image/png;base64,{heatmap_b64}" alt="IC热力图">
+<!-- ── 右侧固定面板：解读指南 ── -->
+{right_panel}
 
-    <h2>2. 全局 IC 汇总表（全时段平均）</h2>
-    <p class="sub">全局均值接近 0 不代表因子无用，可能是牛熊年份相互抵消——看下方「分年度」才是真相</p>
-    {global_table()}
-
-    <h2>3. 分市场环境 IC（持仓5天）</h2>
-    {regime_note}
-    {regime_table(h=5)}
-
-    <h2>4. 分年度 IC（持仓5天）</h2>
-    <p class="sub">同一因子在不同年份表现差异巨大，说明它是「有条件有效」的因子，需配合市场状态开关</p>
-    {yearly_table()}
-
-    <h2>5. IC 时序图（各因子·持仓5天·含市场分期背景）</h2>
-    <p class="sub">柱状图 = 每日IC；深色折线 = 累计IC（斜率向上=因子持续有效）；背景色 = 市场分期</p>
-    <img src="data:image/png;base64,{series_b64}" alt="IC时序图">
+<!-- ── 主内容区（左右 margin 避开两侧面板） ── -->
+<div class="main">
+  <h1>📊 因子 IC 分析报告</h1>
+  <div class="meta">
+    <div class="meta-item"><div class="val">{n_stocks}</div><div class="lbl">有效股票</div></div>
+    <div class="meta-item"><div class="val">{since}</div><div class="lbl">数据起始</div></div>
+    <div class="meta-item"><div class="val">{liquid_pct:.1f}%</div><div class="lbl">流动性达标</div></div>
+    <div class="meta-item"><div class="val">{len(factor_names)}</div><div class="lbl">测试因子</div></div>
+    <div class="meta-item"><div class="val">{now}</div><div class="lbl">生成时间</div></div>
   </div>
 
-  <!-- ── 右侧边栏 ── -->
-  {sidebar}
+  <h2>1. 全局 IC 均值热力图</h2>
+  <p class="sub">横轴 = 买入后持仓多少天；纵轴 = 因子名称；数值越偏离 0 颜色越深</p>
+  <img src="data:image/png;base64,{heatmap_b64}" alt="IC热力图">
 
+  <h2>2. 全局 IC 汇总表（全时段平均）</h2>
+  <p class="sub">全局均值接近 0 不代表因子无用，可能是牛熊年份相互抵消——看下方「分年度」才是真相</p>
+  {global_table()}
+
+  <h2>3. 分市场环境 IC（持仓5天）</h2>
+  {regime_note}
+  {regime_table(h=5)}
+
+  <h2>4. 分年度 IC（持仓5天）</h2>
+  <p class="sub">同一因子在不同年份表现差异巨大，说明它是「有条件有效」的因子，需配合市场状态开关</p>
+  {yearly_table()}
+
+  <h2>5. IC 时序图（各因子·持仓5天·含市场分期背景）</h2>
+  <p class="sub">柱状图 = 每日IC；深色折线 = 累计IC（斜率向上=因子持续有效）；背景色 = 市场分期</p>
+  <img src="data:image/png;base64,{series_b64}" alt="IC时序图">
 </div>
-
-<!-- ── 右下角固定图例浮窗 ── -->
-{float_legend}
 
 </body>
 </html>"""
