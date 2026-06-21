@@ -544,7 +544,7 @@ def generate_html_report(
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
            margin: 0; background: #f0f2f5; color: #212529; }
     /* 外层撑满可用宽度（减去右侧固定面板） */
-    .content-wrap { margin-right: 260px; }
+    .content-wrap { margin-right: 505px; }
     /* 主内容区：限制最大宽度并居中，在大屏上不会撑满 */
     .main { max-width: 1150px; margin: 0 auto;
             padding: 28px 32px 140px; /* 底部 140px 避免浮窗遮住最后一张图 */ }
@@ -564,7 +564,7 @@ def generate_html_report(
     .fl-note { margin-top: 9px; border-top: 1px solid #30363d;
                padding-top: 8px; font-size: 0.88em; color: #8b949e; }
     /* 右侧固定面板：解读指南 */
-    .right-panel { position: fixed; right: 0; top: 0; bottom: 0; width: 260px;
+    .right-panel { position: fixed; right: 0; top: 0; bottom: 0; width: 500px;
                    background: #fff; border-left: 1px solid #dde;
                    padding: 18px 14px; overflow-y: auto; z-index: 100;
                    font-size: 0.81em; }
@@ -713,14 +713,6 @@ def generate_html_report(
       <div class="term"><b>Vol_Shock</b>量比×价格方向：暴量上涨=正，暴量下跌=负（量价共振因子）</div>
       <div class="term"><b>MFI_14</b>14日资金流量指数，综合价量，>80超买，&lt;20超卖（反转因子）</div>
 
-      <h4>市场分期（背景色）</h4>
-      <div class="term" style="line-height:1.8">
-        🔴 熊市(2022)：SPY -23.8%<br>
-        🟠 反弹(22Q4)：熊末反弹<br>
-        🟢 AI牛市(23-24)：两年强牛<br>
-        🟠 关税震荡(25H1)：-17%冲击<br>
-        🔵 复苏(25H2+)：持续新高
-      </div>
     </div>
     """
 
