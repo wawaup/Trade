@@ -253,8 +253,10 @@ def plot_heatmap(results, factor_names, out_path):
     vmax = max(0.06, np.nanmax(np.abs(ic_grid)))
     im = ax.imshow(ic_grid, cmap="RdYlGn", vmin=-vmax, vmax=vmax, aspect="auto")
 
+    horizon_labels = {1: "持仓1天", 3: "持仓3天", 5: "持仓5天\n(约1周)",
+                      10: "持仓10天\n(约2周)", 20: "持仓20天\n(约1月)"}
     ax.set_xticks(range(len(horizons)))
-    ax.set_xticklabels([f"fwd_{h}d" for h in horizons], fontsize=10)
+    ax.set_xticklabels([horizon_labels.get(h, f"fwd_{h}d") for h in horizons], fontsize=9)
     ax.set_yticks(range(len(factor_names)))
     ax.set_yticklabels(factor_names, fontsize=11)
 
@@ -303,9 +305,15 @@ def plot_ic_series(ic_series_all, factor_names, out_path, horizon=5):
             ax.set_title(f"{fname}（无数据）")
             continue
 
-        # 市场环境背景
+        # 市场环境背景（把 end 截断到数据实际范围，避免 x 轴被拉到 2099 年）
+        x_min = ic.index.min()
+        x_max = ic.index.max()
         for rname, (rs, re) in REGIMES.items():
-            ax.axvspan(pd.Timestamp(rs), pd.Timestamp(re),
+            rs_ts = max(pd.Timestamp(rs), x_min)
+            re_ts = min(pd.Timestamp(re), x_max)
+            if rs_ts >= re_ts:
+                continue
+            ax.axvspan(rs_ts, re_ts,
                        alpha=0.15, color=regime_colors.get(rname, "#eee"), label=None)
 
         mean_v = ic.mean()
@@ -383,129 +391,206 @@ def generate_html_report(
     series_b64  = _img_b64(series_path)
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # ── CSS ──────────────────────────────────────────────────────────────────
+    # 持仓周期的中文说明
+    horizon_label = {1: "1天后", 3: "3天后", 5: "5天后\n(约1周)",
+                     10: "10天后\n(约2周)", 20: "20天后\n(约1月)"}
+
     css = """
+    * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-           margin: 0; background: #f8f9fa; color: #212529; }
-    .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
-    h1 { color: #1a1a2e; border-bottom: 3px solid #4361ee; padding-bottom: 8px; }
-    h2 { color: #1a1a2e; margin-top: 40px; font-size: 1.2em;
+           margin: 0; background: #f0f2f5; color: #212529; }
+    /* 整体两栏布局 */
+    .page-wrap { display: flex; min-height: 100vh; }
+    .main { flex: 1; min-width: 0; padding: 28px 32px; max-width: 900px; }
+    .sidebar { width: 280px; flex-shrink: 0; background: #fff;
+               border-left: 1px solid #e0e0e0; padding: 24px 18px;
+               position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+    h1 { color: #1a1a2e; border-bottom: 3px solid #4361ee;
+         padding-bottom: 10px; margin-top: 0; font-size: 1.5em; }
+    h2 { color: #1a1a2e; margin-top: 44px; font-size: 1.1em;
          border-left: 4px solid #4361ee; padding-left: 12px; }
-    .meta { background: #fff; border-radius: 8px; padding: 16px;
-            display: flex; gap: 32px; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
-    .meta-item { text-align: center; }
-    .meta-item .val { font-size: 1.8em; font-weight: 700; color: #4361ee; }
-    .meta-item .lbl { font-size: 0.85em; color: #666; }
-    table { border-collapse: collapse; width: 100%; margin: 16px 0;
-            background: #fff; border-radius: 8px; overflow: hidden;
-            box-shadow: 0 1px 4px rgba(0,0,0,.1); font-size: 0.9em; }
-    th { background: #1a1a2e; color: #fff; padding: 10px 14px; text-align: center; }
-    td { padding: 8px 14px; text-align: center; border-bottom: 1px solid #eee; }
+    .sidebar h3 { color: #1a1a2e; font-size: 1em; margin-top: 0;
+                  border-bottom: 2px solid #4361ee; padding-bottom: 6px; }
+    .sidebar h4 { color: #4361ee; font-size: 0.9em; margin: 16px 0 6px; }
+    /* 顶部元信息 */
+    .meta { background: #fff; border-radius: 10px; padding: 16px 20px;
+            display: flex; flex-wrap: wrap; gap: 20px;
+            box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 8px; }
+    .meta-item { text-align: center; min-width: 90px; }
+    .meta-item .val { font-size: 1.5em; font-weight: 700; color: #4361ee; }
+    .meta-item .lbl { font-size: 0.78em; color: #888; margin-top: 2px; }
+    /* 表格 */
+    table { border-collapse: collapse; width: 100%; margin: 12px 0;
+            background: #fff; border-radius: 10px; overflow: hidden;
+            box-shadow: 0 1px 4px rgba(0,0,0,.08); font-size: 0.88em; }
+    th { background: #1a1a2e; color: #fff; padding: 9px 12px;
+         text-align: center; white-space: pre-line; line-height: 1.4; }
+    td { padding: 7px 12px; text-align: center; border-bottom: 1px solid #f0f0f0; }
     tr:last-child td { border-bottom: none; }
-    td.factor-name { text-align: left; font-weight: 600; }
-    .legend { display: flex; gap: 16px; font-size: 0.85em; margin: 8px 0; }
-    .legend-item { display: flex; align-items: center; gap: 6px; }
-    .legend-dot { width: 14px; height: 14px; border-radius: 3px; }
-    img { max-width: 100%; border-radius: 8px;
-          box-shadow: 0 2px 8px rgba(0,0,0,.15); margin: 8px 0; }
-    .regime-tag { font-size: 0.75em; color: #666; }
+    td.fn { text-align: left; font-weight: 600; font-family: monospace;
+            white-space: nowrap; }
+    /* 图片 */
+    img { max-width: 100%; border-radius: 10px;
+          box-shadow: 0 2px 10px rgba(0,0,0,.12); margin: 6px 0; }
+    /* 备注框 */
     .note { background: #e8f4fd; border-left: 4px solid #4361ee;
-            padding: 12px 16px; border-radius: 0 8px 8px 0;
-            margin: 16px 0; font-size: 0.9em; line-height: 1.6; }
-    .star { color: #e65100; font-weight: bold; }
+            padding: 11px 14px; border-radius: 0 8px 8px 0;
+            margin: 12px 0; font-size: 0.88em; line-height: 1.7; }
+    .note b { color: #1a1a2e; }
+    .sub { font-size: 0.8em; color: #777; margin: 4px 0 12px; }
+    /* 侧边栏图例行 */
+    .leg-row { display: flex; align-items: center; gap: 8px;
+               margin: 5px 0; font-size: 0.83em; line-height: 1.4; }
+    .leg-dot { width: 16px; height: 16px; border-radius: 4px; flex-shrink: 0; }
+    .leg-star { color: #e65100; font-weight: bold; font-size: 1em; }
+    /* 侧边栏术语 */
+    .term { margin: 6px 0; font-size: 0.83em; line-height: 1.5; }
+    .term b { color: #1a1a2e; display: block; margin-bottom: 2px; }
+    /* 固定浮窗 */
+    .float-legend { position: fixed; bottom: 22px; right: 22px; z-index: 999;
+                    background: rgba(26,26,46,0.93); color: #fff;
+                    border-radius: 10px; padding: 12px 16px; width: 230px;
+                    font-size: 0.8em; box-shadow: 0 4px 16px rgba(0,0,0,.3);
+                    line-height: 1.5; }
+    .float-legend .fl-title { font-weight: 700; font-size: 0.9em;
+                               border-bottom: 1px solid rgba(255,255,255,.2);
+                               padding-bottom: 6px; margin-bottom: 8px; }
+    .fl-row { display: flex; align-items: center; gap: 7px; margin: 4px 0; }
+    .fl-dot { width: 13px; height: 13px; border-radius: 3px; flex-shrink: 0; }
+    .fl-star { color: #ffa726; }
     """
 
-    # ── 全局汇总表 ────────────────────────────────────────────────────────────
+    # ── 表格生成函数 ──────────────────────────────────────────────────────────
     def global_table():
-        cols_html = "".join(f"<th>fwd_{h}d</th>" for h in HORIZONS)
-        rows_html = ""
+        cols = "".join(
+            f'<th>{horizon_label.get(h, f"fwd_{h}d")}</th>' for h in HORIZONS
+        )
+        rows = ""
         for fname in factor_names:
-            row = f'<td class="factor-name">{fname}</td>'
+            row = f'<td class="fn">{fname}</td>'
             for h in HORIZONS:
-                s  = results[(fname, h)]
-                ic = s["IC_mean"]
-                ir = s["ICIR"]
-                bg = _ic_color(ic, ir)
-                row += f'<td style="background:{bg}">{_ic_text(ic, ir)}</td>'
-            rows_html += f"<tr>{row}</tr>"
-        return f"""
-        <table>
-          <thead><tr><th>因子</th>{cols_html}</tr></thead>
-          <tbody>{rows_html}</tbody>
-        </table>"""
+                s = results[(fname, h)]
+                ic, ir = s["IC_mean"], s["ICIR"]
+                row += f'<td style="background:{_ic_color(ic,ir)}">{_ic_text(ic,ir)}</td>'
+            rows += f"<tr>{row}</tr>"
+        return f'<table><thead><tr><th>因子</th>{cols}</tr></thead><tbody>{rows}</tbody></table>'
 
-    # ── 分市场环境表（fwd_5d）────────────────────────────────────────────────
     def regime_table(h=5):
         rnames = list(REGIMES.keys())
-        cols_html = "".join(f"<th>{r}</th>" for r in rnames)
-        rows_html = ""
+        cols = "".join(f"<th>{r}</th>" for r in rnames)
+        rows = ""
         for fname in factor_names:
-            row = f'<td class="factor-name">{fname}</td>'
+            row = f'<td class="fn">{fname}</td>'
             for rname in rnames:
-                s  = regime_stats.get((rname, fname, h), {})
-                ic = s.get("IC_mean", np.nan)
-                ir = s.get("ICIR",    np.nan)
-                n  = s.get("n_days",  0)
-                bg = _ic_color(ic, ir)
-                txt = _ic_text(ic, ir)
-                row += f'<td style="background:{bg}" title="n={n}">{txt}</td>'
-            rows_html += f"<tr>{row}</tr>"
-        return f"""
-        <table>
-          <thead><tr><th>因子</th>{cols_html}</tr></thead>
-          <tbody>{rows_html}</tbody>
-        </table>"""
+                s = regime_stats.get((rname, fname, h), {})
+                ic, ir = s.get("IC_mean", np.nan), s.get("ICIR", np.nan)
+                n = s.get("n_days", 0)
+                row += (f'<td style="background:{_ic_color(ic,ir)}" title="样本天数={n}">'
+                        f'{_ic_text(ic,ir)}</td>')
+            rows += f"<tr>{row}</tr>"
+        return f'<table><thead><tr><th>因子</th>{cols}</tr></thead><tbody>{rows}</tbody></table>'
 
-    # ── 分年度表（fwd_5d）────────────────────────────────────────────────────
     def yearly_table():
-        cols_html = "".join(f"<th>{yr}</th>" for yr in years)
-        rows_html = ""
+        cols = "".join(f"<th>{yr}年</th>" for yr in years)
+        rows = ""
         for fname in factor_names:
-            row = f'<td class="factor-name">{fname}</td>'
+            row = f'<td class="fn">{fname}</td>'
             for yr in years:
-                s  = yearly_stats.get((fname, yr), {})
-                ic = s.get("IC_mean", np.nan)
-                ir = s.get("ICIR",    np.nan)
-                bg = _ic_color(ic, ir)
-                row += f'<td style="background:{bg}">{_ic_text(ic, ir)}</td>'
-            rows_html += f"<tr>{row}</tr>"
-        return f"""
-        <table>
-          <thead><tr><th>因子</th>{cols_html}</tr></thead>
-          <tbody>{rows_html}</tbody>
-        </table>"""
+                s = yearly_stats.get((fname, yr), {})
+                ic, ir = s.get("IC_mean", np.nan), s.get("ICIR", np.nan)
+                row += f'<td style="background:{_ic_color(ic,ir)}">{_ic_text(ic,ir)}</td>'
+            rows += f"<tr>{row}</tr>"
+        return f'<table><thead><tr><th>因子</th>{cols}</tr></thead><tbody>{rows}</tbody></table>'
 
-    # ── 图例 ──────────────────────────────────────────────────────────────────
-    legend_html = """
-    <div class="legend">
-      <div class="legend-item"><div class="legend-dot" style="background:#4caf50"></div>
-        强有效（|IC|>0.03 且 |ICIR|≥0.5）正向</div>
-      <div class="legend-item"><div class="legend-dot" style="background:#f44336"></div>
-        强有效 负向（反转因子）</div>
-      <div class="legend-item"><div class="legend-dot" style="background:#a5d6a7"></div>
-        弱有效（|IC|>0.03，ICIR不足）正向</div>
-      <div class="legend-item"><div class="legend-dot" style="background:#ef9a9a"></div>
-        弱有效 负向</div>
-      <div class="legend-item"><div class="legend-dot" style="background:#fffde7"></div>
-        微弱信号</div>
-      <div class="legend-item"><div class="legend-dot" style="background:#f5f5f5"></div>
-        噪音（无统计意义）</div>
+    # ── 侧边栏内容 ────────────────────────────────────────────────────────────
+    sidebar = """
+    <div class="sidebar">
+      <h3>📖 评判标准与解读</h3>
+
+      <h4>有效因子双重标准</h4>
+      <div class="term">
+        <b>|IC 均值| &gt; 0.03</b>
+        因子对未来涨跌有预测能力。IC = 0 意味着完全随机，>0.03 才有统计意义。
+      </div>
+      <div class="term">
+        <b>|ICIR| &gt; 0.5</b>
+        因子表现稳定，不靠某次偶发暴涨拉高均值。ICIR = IC均值 ÷ IC标准差，类似夏普比率。
+      </div>
+
+      <h4>术语速查</h4>
+      <div class="term">
+        <b>IC（信息系数）</b>
+        当天所有股票的因子值排名 vs 未来涨跌排名 的相关系数。+1=完美预测涨跌，-1=完美反向，0=无效。
+      </div>
+      <div class="term">
+        <b>ICIR（IC信息比率）</b>
+        IC的稳定性得分。越高说明因子越可靠，不是靠运气。
+      </div>
+      <div class="term">
+        <b>持仓X天（fwd_Xd）</b>
+        买入信号出现后，持有X个交易日的累计涨跌幅。例如"持仓5天"= 买入后一周的收益率。
+      </div>
+      <div class="term">
+        <b>正向因子</b>
+        因子值越大，预期未来涨幅越大（追涨动量逻辑）。
+      </div>
+      <div class="term">
+        <b>负向因子</b>
+        因子值越大，预期未来跌幅越大（均值回归逻辑）。负向因子同样有用，只需反向使用。
+      </div>
+
+      <h4>各因子简介</h4>
+      <div class="term"><b>Ret_5</b>过去5日涨跌幅（短期动量）</div>
+      <div class="term"><b>Ret_20</b>过去20日涨跌幅（月度动量，学术主流窗口）</div>
+      <div class="term"><b>BIAS_20</b>股价偏离20日均线的程度（乖离率，反转因子）</div>
+      <div class="term"><b>VPT_slope</b>量价趋势因子5日变化，捕捉机构吸筹/出货</div>
+      <div class="term"><b>HV_ratio</b>短期波动率÷长期波动率，>1表示近期异动</div>
+      <div class="term"><b>RS_QQQ</b>个股收益 - QQQ收益，剔除大盘影响后的独立强度</div>
+
+      <h4>市场分期（背景色）</h4>
+      <div class="term" style="font-size:0.8em">
+        🔴 熊市(2022)：SPY -23.8%<br>
+        🟠 反弹(22Q4)：熊末反弹<br>
+        🟢 AI牛市(23-24)：两年强牛<br>
+        🟠 关税震荡(25H1)：-17%冲击<br>
+        🔵 复苏(25H2+)：持续新高
+      </div>
     </div>
-    <p><span class="star">★</span> = |ICIR| ≥ 0.5（因子表现稳定，不靠偶发事件）</p>
     """
 
-    # ── 分期说明 ──────────────────────────────────────────────────────────────
+    # ── 固定浮窗图例 ──────────────────────────────────────────────────────────
+    float_legend = """
+    <div class="float-legend">
+      <div class="fl-title">颜色含义速查</div>
+      <div class="fl-row"><div class="fl-dot" style="background:#4caf50"></div>
+        强有效·正向（动量）</div>
+      <div class="fl-row"><div class="fl-dot" style="background:#f44336"></div>
+        强有效·负向（反转）</div>
+      <div class="fl-row"><div class="fl-dot" style="background:#a5d6a7"></div>
+        弱有效·正向</div>
+      <div class="fl-row"><div class="fl-dot" style="background:#ef9a9a"></div>
+        弱有效·负向</div>
+      <div class="fl-row"><div class="fl-dot" style="background:#fffde7;border:1px solid #ccc"></div>
+        微弱信号</div>
+      <div class="fl-row"><div class="fl-dot" style="background:#e0e0e0"></div>
+        噪音·无意义</div>
+      <div style="margin-top:8px;border-top:1px solid rgba(255,255,255,.2);
+                  padding-top:6px;font-size:0.85em">
+        <span class="fl-star">★</span> = ICIR ≥ 0.5（稳定有效）<br>
+        标准：|IC|&gt;0.03 且 |ICIR|&gt;0.5
+      </div>
+    </div>
+    """
+
+    # ── 市场分期说明框 ────────────────────────────────────────────────────────
     regime_note = """
     <div class="note">
-      <b>市场分期依据（基于实际 SPY 数据核验）：</b><br>
-      🔴 <b>熊市(2022)</b> 2022-01-04 ~ 2022-10-12：SPY 从 446→340，跌 -23.8%，
-         全程在 MA200 以下，高波动（年化 23.8%）<br>
-      🟠 <b>反弹(22Q4)</b> 2022-10-13 ~ 2022-12-31：熊市末期反弹，高不确定性<br>
-      🟢 <b>AI牛市(23-24)</b> 2023-01-01 ~ 2024-12-31：两年强牛，+26%/+25%，
-         低波动（年化 14.7%/10.7%），全程在 MA200 上方<br>
-      🟠 <b>关税震荡(25H1)</b> 2025-01-01 ~ 2025-06-05：关税冲击，SPY 从 601→497（-17.2%），
-         4月8日为最低点<br>
-      🔵 <b>复苏(25H2+)</b> 2025-06-06 ~ 至今：从低点强力反弹，持续创新高
+      <b>市场分期依据（基于实际 SPY 日线数据核验）</b><br>
+      🔴 <b>熊市(2022)</b> 01-04 ~ 10-12：SPY 446→340（-23.8%），全程在 MA200 以下，年化波动 23.8%<br>
+      🟠 <b>反弹(22Q4)</b> 10-13 ~ 12-31：熊末反弹，高不确定性<br>
+      🟢 <b>AI牛市(23-24)</b> 2023-01-01 ~ 2024-12-31：两年强牛 +26%/+25%，MA200 上方，低波动<br>
+      🟠 <b>关税震荡(25H1)</b> 2025-01-01 ~ 06-05：关税冲击 SPY 601→497（-17.2%），4月8日最低<br>
+      🔵 <b>复苏(25H2+)</b> 2025-06-06 ~ 今：强力反弹，持续创新高
     </div>
     """
 
@@ -518,49 +603,48 @@ def generate_html_report(
   <style>{css}</style>
 </head>
 <body>
-<div class="container">
+<div class="page-wrap">
 
-  <h1>📊 因子 IC 分析报告</h1>
-  <div class="meta">
-    <div class="meta-item"><div class="val">{n_stocks}</div><div class="lbl">有效股票数</div></div>
-    <div class="meta-item"><div class="val">{since}</div><div class="lbl">数据起始</div></div>
-    <div class="meta-item"><div class="val">{liquid_pct:.1f}%</div><div class="lbl">流动性达标比例</div></div>
-    <div class="meta-item"><div class="val">{len(factor_names)}</div><div class="lbl">测试因子数</div></div>
-    <div class="meta-item"><div class="val">{len(HORIZONS)}</div><div class="lbl">预测周期数</div></div>
-    <div class="meta-item"><div class="val">{now}</div><div class="lbl">生成时间</div></div>
+  <!-- ── 主内容区 ── -->
+  <div class="main">
+    <h1>📊 因子 IC 分析报告</h1>
+    <div class="meta">
+      <div class="meta-item"><div class="val">{n_stocks}</div><div class="lbl">有效股票</div></div>
+      <div class="meta-item"><div class="val">{since}</div><div class="lbl">数据起始</div></div>
+      <div class="meta-item"><div class="val">{liquid_pct:.1f}%</div><div class="lbl">流动性达标</div></div>
+      <div class="meta-item"><div class="val">{len(factor_names)}</div><div class="lbl">测试因子</div></div>
+      <div class="meta-item"><div class="val">{now}</div><div class="lbl">生成时间</div></div>
+    </div>
+
+    <h2>1. 全局 IC 均值热力图</h2>
+    <p class="sub">横轴 = 买入后持仓多少天；纵轴 = 因子名称；数值越偏离 0 颜色越深</p>
+    <img src="data:image/png;base64,{heatmap_b64}" alt="IC热力图">
+
+    <h2>2. 全局 IC 汇总表（全时段平均）</h2>
+    <p class="sub">全局均值接近 0 不代表因子无用，可能是牛熊年份相互抵消——看下方「分年度」才是真相</p>
+    {global_table()}
+
+    <h2>3. 分市场环境 IC（持仓5天）</h2>
+    {regime_note}
+    {regime_table(h=5)}
+
+    <h2>4. 分年度 IC（持仓5天）</h2>
+    <p class="sub">同一因子在不同年份表现差异巨大，说明它是「有条件有效」的因子，需配合市场状态开关</p>
+    {yearly_table()}
+
+    <h2>5. IC 时序图（各因子·持仓5天·含市场分期背景）</h2>
+    <p class="sub">柱状图 = 每日IC；深色折线 = 累计IC（斜率向上=因子持续有效）；背景色 = 市场分期</p>
+    <img src="data:image/png;base64,{series_b64}" alt="IC时序图">
   </div>
 
-  <h2>1. 全局 IC 均值热力图</h2>
-  <img src="data:image/png;base64,{heatmap_b64}" alt="IC热力图">
-
-  <h2>2. 全局 IC 汇总表（全时段均值）</h2>
-  {legend_html}
-  {global_table()}
-
-  <h2>3. 分市场环境 IC（fwd_5d）</h2>
-  {regime_note}
-  {regime_table(h=5)}
-
-  <h2>4. 分年度 IC（fwd_5d）</h2>
-  <p class="regime-tag">全局 IC 接近 0 往往是被不同年份"中和"的结果；分年度可以看出因子在不同周期的真实表现。</p>
-  {yearly_table()}
-
-  <h2>5. IC 时序图（各因子 fwd_5d，含市场分期背景）</h2>
-  <img src="data:image/png;base64,{series_b64}" alt="IC时序图">
-
-  <h2>6. 评判标准与解读指南</h2>
-  <div class="note">
-    <b>有效因子双重标准：</b><br>
-    • |IC 均值| &gt; 0.03：因子具有统计意义上的预测能力<br>
-    • |ICIR| &gt; 0.5：因子表现稳定（ICIR = IC均值 / IC标准差，类似夏普比率）<br><br>
-    <b>常见解读：</b><br>
-    • 动量因子（Ret_5, Ret_20, RS_QQQ）在牛市通常 IC &gt; 0，熊市可能变负<br>
-    • 反转因子（BIAS_20）在震荡市和熊市通常 IC &lt; 0（意味着负向预测：偏离越大越要回归）<br>
-    • 波动率因子（HV_ratio）在趋势启动前夕 IC 可能激增，方向需结合大盘判断<br>
-    • 全局 IC 接近 0 但分环境 IC 分化明显 → 该因子需要配合「市场状态开关」使用
-  </div>
+  <!-- ── 右侧边栏 ── -->
+  {sidebar}
 
 </div>
+
+<!-- ── 右下角固定图例浮窗 ── -->
+{float_legend}
+
 </body>
 </html>"""
 
