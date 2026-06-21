@@ -543,8 +543,8 @@ def generate_html_report(
     * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
            margin: 0; background: #f0f2f5; color: #212529; }
-    /* 外层撑满可用宽度（减去右侧固定面板） */
-    .content-wrap { margin-right: 505px; }
+    /* 外层撑满可用宽度（减去右侧固定面板，用 vw 跟随视口） */
+    .content-wrap { margin-right: 30vw; }
     /* 主内容区：限制最大宽度并居中，在大屏上不会撑满 */
     .main { max-width: 1150px; margin: 0 auto;
             padding: 28px 32px 140px; /* 底部 140px 避免浮窗遮住最后一张图 */ }
@@ -564,7 +564,8 @@ def generate_html_report(
     .fl-note { margin-top: 9px; border-top: 1px solid #30363d;
                padding-top: 8px; font-size: 0.88em; color: #8b949e; }
     /* 右侧固定面板：解读指南 */
-    .right-panel { position: fixed; right: 0; top: 0; bottom: 0; width: 500px;
+    .right-panel { position: fixed; right: 0; top: 0; bottom: 0;
+                   width: 30vw; min-width: 280px; max-width: 560px;
                    background: #fff; border-left: 1px solid #dde;
                    padding: 18px 14px; overflow-y: auto; z-index: 100;
                    font-size: 0.81em; }
