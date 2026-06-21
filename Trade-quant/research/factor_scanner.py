@@ -435,9 +435,11 @@ def generate_html_report(
     * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
            margin: 0; background: #f0f2f5; color: #212529; }
-    /* 主内容区：右留 270px 避开右侧固定面板，左侧只留少量边距 */
-    .main { margin-left: 20px; margin-right: 275px;
-            padding: 24px 28px; min-width: 0; }
+    /* 外层撑满可用宽度（减去右侧固定面板） */
+    .content-wrap { margin-right: 260px; }
+    /* 主内容区：限制最大宽度并居中，在大屏上不会撑满 */
+    .main { max-width: 900px; margin: 0 auto;
+            padding: 28px 32px 140px; /* 底部 140px 避免浮窗遮住最后一张图 */ }
     /* 左下角小浮窗：颜色速查 */
     .float-legend { position: fixed; left: 18px; bottom: 18px; z-index: 999;
                     background: rgba(13,17,23,0.92); color: #e6edf3;
@@ -638,8 +640,8 @@ def generate_html_report(
 <!-- ── 右侧固定面板：解读指南 ── -->
 {right_panel}
 
-<!-- ── 主内容区（左右 margin 避开两侧面板） ── -->
-<div class="main">
+<!-- ── 主内容区（右侧留给固定面板，内容本身 max-width 居中） ── -->
+<div class="content-wrap"><div class="main">
   <h1>📊 因子 IC 分析报告</h1>
   <div class="meta">
     <div class="meta-item"><div class="val">{n_stocks}</div><div class="lbl">有效股票</div></div>
@@ -668,7 +670,7 @@ def generate_html_report(
   <h2>5. IC 时序图（各因子·持仓5天·含市场分期背景）</h2>
   <p class="sub">柱状图 = 每日IC；深色折线 = 累计IC（斜率向上=因子持续有效）；背景色 = 市场分期</p>
   <img src="data:image/png;base64,{series_b64}" alt="IC时序图">
-</div>
+</div></div>
 
 </body>
 </html>"""
