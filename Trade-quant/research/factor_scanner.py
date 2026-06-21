@@ -7,7 +7,8 @@
   BIAS_20    — 20日乖离率（均值回归，预期负向 IC）
   VPT_slope  — VPT 5日斜率（量价趋势）
   HV_ratio   — 短期/长期历史波动率比（异动预警）
-  RS_QQQ     — 个股相对 QQQ 的超额收益（独立强度）
+  LR_Slope   — 20日线性回归斜率 × R²（平滑动量，过滤单日暴涨噪音）
+  RS_Beta    — Beta 调整后残差动量（剔除大盘 Beta，真正的个股独立强度）
 
 市场环境分期（基于实际 SPY 数据）：
   熊市(2022)    2022-01-04 ~ 2022-10-12  SPY -23.8%，全程在MA200下方
@@ -125,6 +126,42 @@ def build_liquidity_mask(close, vol, min_dollar_vol=5_000_000, min_price=2.0, wi
 
 # ── 因子计算 ──────────────────────────────────────────────────────────────────
 
+def _rolling_lr_slope_r2(price_df, window=20):
+    """
+    滚动线性回归斜率 × R²，按当前价格归一化。
+
+    每根K线：对最近 window 天价格拟合直线，
+      slope / price 近似"每天涨多少百分比"，× R² 惩罚杂乱走势。
+    趋势越平滑、R² 越高 → 因子值越强；单日暴涨后 R² 会很低，自动过滤。
+    """
+    arr  = price_df.values.astype(float)   # (T, N)
+    T, N = arr.shape
+    x    = np.arange(window, dtype=float)
+    x   -= x.mean()                         # 均值中心化
+    x_ss = (x ** 2).sum()                  # Σ(xi - x̄)²
+
+    out = np.full((T, N), np.nan)
+    for i in range(window - 1, T):
+        y        = arr[i - window + 1 : i + 1]      # (window, N)
+        nan_col  = np.isnan(y).any(axis=0)           # 有 NaN 的列跳过
+        y_mean   = np.nanmean(y, axis=0)             # (N,)
+        y_c      = y - y_mean
+        slope    = (x @ y_c) / x_ss                  # (N,) OLS 斜率
+        y_hat    = y_mean + x[:, None] * slope        # (window, N)
+        ss_res   = ((y - y_hat) ** 2).sum(axis=0)
+        ss_tot   = (y_c        ** 2).sum(axis=0)
+        r2       = np.clip(
+            np.where(ss_tot > 0, 1 - ss_res / ss_tot, 0.0), 0, 1
+        )
+        cur_p    = arr[i]
+        out[i]   = np.where(
+            nan_col | (cur_p == 0) | np.isnan(cur_p),
+            np.nan,
+            slope / cur_p * r2,
+        )
+    return pd.DataFrame(out, index=price_df.index, columns=price_df.columns)
+
+
 def compute_factors(close, vol, qqq_close):
     factors = {}
 
@@ -132,7 +169,7 @@ def compute_factors(close, vol, qqq_close):
     factors["Ret_5"]  = close.pct_change(5)
     factors["Ret_20"] = close.pct_change(20)
 
-    # 乖离率：偏离20日均线（预期负向 IC，涨多了回调）
+    # 乖离率：偏离20日均线（预期负向 IC，均值回归）
     ma20 = close.rolling(20).mean()
     factors["BIAS_20"] = (close - ma20) / ma20
 
@@ -141,16 +178,27 @@ def compute_factors(close, vol, qqq_close):
     vpt_scale = vpt.abs().rolling(20).mean().replace(0, np.nan)
     factors["VPT_slope"] = vpt.diff(5) / vpt_scale
 
-    # HV 比率：短期/长期历史波动率，异动信号
+    # HV 比率：短期/长期历史波动率，近期异动程度
     log_ret = np.log(close / close.shift(1))
     hv5  = log_ret.rolling(5).std()
     hv20 = log_ret.rolling(20).std().replace(0, np.nan)
     factors["HV_ratio"] = hv5 / hv20
 
-    # 相对强弱：剔除 QQQ beta 后的个股独立强度
-    stock_ret5 = close.pct_change(5)
-    qqq_ret5   = qqq_close.pct_change(5)
-    factors["RS_QQQ"] = stock_ret5.sub(qqq_ret5, axis=0)
+    # 线性回归动量：20日斜率 × R²，过滤单日暴涨噪音
+    factors["LR_Slope"] = _rolling_lr_slope_r2(close, window=20)
+
+    # Beta 调整残差动量：剔除大盘 Beta 后的个股独立强度
+    # Beta = rolling 60日 cov(stock, QQQ) / var(QQQ)
+    # RS_Beta = stock_ret20 - Beta * qqq_ret20（每只股票减去不同值，排名才有意义）
+    daily_ret  = close.pct_change()
+    qqq_daily  = qqq_close.pct_change()
+    qqq_var60  = qqq_daily.rolling(60).var()
+    rolling_cov = daily_ret.apply(lambda col: col.rolling(60).cov(qqq_daily))
+    beta60     = rolling_cov.div(qqq_var60, axis=0)
+    qqq_ret20  = qqq_close.pct_change(20)
+    factors["RS_Beta"] = close.pct_change(20).sub(
+        beta60.mul(qqq_ret20, axis=0)
+    )
 
     return factors
 
@@ -438,7 +486,7 @@ def generate_html_report(
     /* 外层撑满可用宽度（减去右侧固定面板） */
     .content-wrap { margin-right: 260px; }
     /* 主内容区：限制最大宽度并居中，在大屏上不会撑满 */
-    .main { max-width: 900px; margin: 0 auto;
+    .main { max-width: 1150px; margin: 0 auto;
             padding: 28px 32px 140px; /* 底部 140px 避免浮窗遮住最后一张图 */ }
     /* 左下角小浮窗：颜色速查 */
     .float-legend { position: fixed; left: 18px; bottom: 18px; z-index: 999;
@@ -599,7 +647,8 @@ def generate_html_report(
       <div class="term"><b>BIAS_20</b>股价偏离20日均线（乖离率，反转因子）</div>
       <div class="term"><b>VPT_slope</b>量价趋势5日斜率（机构吸筹/出货）</div>
       <div class="term"><b>HV_ratio</b>短期÷长期波动率（近期异动程度）</div>
-      <div class="term"><b>RS_QQQ</b>个股超额收益 vs QQQ（剔除大盘干扰）</div>
+      <div class="term"><b>LR_Slope</b>20日线性回归斜率×R²，过滤单日暴涨噪音，比 Ret_20 平滑</div>
+      <div class="term"><b>RS_Beta</b>个股20日收益 − Beta×QQQ收益，剔除大盘解释后的真实Alpha强度</div>
 
       <h4>市场分期（背景色）</h4>
       <div class="term" style="line-height:1.8">
