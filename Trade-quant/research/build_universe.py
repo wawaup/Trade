@@ -52,22 +52,35 @@ SOXX_COMPONENTS = [
 ARKK_FALLBACK = [
     # ARK 核心持仓
     "TSLA", "ROKU", "COIN", "TWLO", "TDOC", "SHOP", "SPOT", "RBLX",
-    "PATH", "CRSP", "BEAM", "NTLA", "EXAS", "IOVA", "PSTG", "SQ",
+    "PATH", "CRSP", "BEAM", "NTLA", "IOVA", "XYZ",  # SQ→XYZ (Block Inc)
     "SOFI", "HOOD", "DKNG", "PLTR", "AI",   "SOUN", "BBAI", "RXRX",
-    "PACB", "FATE", "EDIT", "VERV", "U",    "GTLB", "MDB",  "SNOW",
-    "DDOG", "CFLT", "NET",  "ZS",   "CRWD", "AFRM", "UPST", "NU",
+    "PACB", "FATE", "EDIT", "U",    "GTLB", "MDB",  "SNOW",
+    "DDOG", "NET",  "ZS",   "CRWD", "AFRM", "UPST", "NU",
     "TOST", "DASH", "UBER", "ABNB", "LYFT",
     # ARKW 补充（互联网/金融科技/AI应用）
-    "BKNG", "MELI", "SE",   "GRAB", "DLOCAL", "BILL", "ADYEN",
-    "PYPL", "V",    "MA",   "GOOGL","META",   "AMZN",
+    "BKNG", "MELI", "SE",   "GRAB", "DLO",  "BILL",
+    "PYPL", "V",    "MA",   "GOOGL","META",  "AMZN",
     # ARKQ 补充（自动化/机器人/太空）
-    "KTOS", "RKLB", "SPCE", "ACHR", "JOBY",  "LILM", "NKLA",
+    "KTOS", "RKLB", "SPCE", "ACHR", "JOBY",
     "TDG",  "HII",  "LHX",  "NOC",  "GD",
     # 高成长云/SaaS
     "HUBS", "VEEV", "WDAY", "NOW",  "CRM",   "ADBE", "INTU",
     "ZM",   "DOCU", "OKTA", "ESTC", "APPN",  "MNDY", "BRZE",
     # AI推理/MLOps
-    "SMAR", "ASAN", "BOX",  "FROG", "DOCN",  "CLOU",
+    "ASAN", "BOX",  "FROG", "DOCN", "CLOU",
+    # 已确认退市/私有化（注释留档）：CFLT EXAS PSTG VERV SMAR LILM NKLA IIVI ADYEN DLOCAL
+]
+
+# ── Layer 3b: IGV 成分股（iShares 扩展科技软件板块 ETF）─────────────────────
+# 覆盖高波动软件股，与 ARKK 的 SaaS 有重叠，合并后去重
+IGV_COMPONENTS = [
+    "MSFT", "ORCL", "NOW",  "ADBE", "INTU", "SNPS", "CDNS", "PANW",
+    "CRWD", "FTNT", "PTC",  "TYL",  "MANH", "HUBS", "DDOG",
+    "MDB",  "TEAM", "SNOW", "ZS",   "NET",  "OKTA", "WDAY", "CRM",
+    "VEEV", "PCTY", "PAYC", "GWRE", "NCNO",
+    "BRZE", "GTLB", "APPN", "DOCU", "DOCN", "ESTC", "FROG", "BOX",
+    "ASAN", "ZM",   "TWLO", "TOST", "BILL", "AFRM", "HOOD", "SOFI",
+    # 已退市：ANSS(被SNPS收购) COUP(私有化) ALTR(被Siemens收购) SMAR(私有化)
 ]
 
 # ── Layer 4: 手动补充 ────────────────────────────────────────────────────────
@@ -119,10 +132,11 @@ def build_universe() -> dict:
     arkk_symbols = try_fetch_arkk()
 
     layers = {
-        "XSD":      XSD_COMPONENTS,
-        "SOXX":     SOXX_COMPONENTS,
+        "XSD":       XSD_COMPONENTS,
+        "SOXX":      SOXX_COMPONENTS,
         "ARKK_ARKW": arkk_symbols,
-        "manual":   MANUAL_SUPPLEMENT,
+        "IGV":       IGV_COMPONENTS,
+        "manual":    MANUAL_SUPPLEMENT,
     }
 
     seen: set[str] = set()
