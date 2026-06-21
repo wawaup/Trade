@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
-from backtest_engine import StrategyConfig, auto_classify, compute_grid, load_raw, compute_indicators, run_backtest
+from backtest_engine import StrategyConfig, auto_classify, compute_grid, load_raw, compute_indicators, run_backtest, compute_market_regime
 from walk_forward import WFConfig, _generate_windows
 
 warnings.filterwarnings("ignore")
@@ -49,11 +49,21 @@ def _ts(t) -> int:
     return int(ts.timestamp())
 
 
-def collect_data(wf_cfg: WFConfig, max_windows: int = 0) -> dict:
+def collect_data(wf_cfg: WFConfig, max_windows: int = 0, d_trend_min_mas: int = 4) -> dict:
     windows = _generate_windows(wf_cfg)
     if max_windows > 0:
         windows = windows[:max_windows]
     print(f"  共生成 {len(windows)} 个 OOS 窗口\n  预加载数据...", flush=True)
+
+    # 加载 SPY 日线数据，计算市场 regime（周收盘>MA20）
+    spy_regime = None
+    try:
+        spy_path = Path(__file__).parent.parent / "data" / "spy_1d_raw.parquet"
+        spy_df = pd.read_parquet(spy_path)
+        spy_regime = compute_market_regime(spy_df)
+        print(f"    SPY      市场 regime 已加载 (周线>MA20 过滤)", flush=True)
+    except Exception as e:
+        print(f"    SPY      regime 加载失败，跳过大盘过滤: {e}", flush=True)
 
     raw_cache: dict = {}
     df_cache:  dict = {}
@@ -61,7 +71,7 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0) -> dict:
         try:
             raw = load_raw(sym, "1h")
             raw_cache[sym] = raw
-            df_cache[sym]  = compute_indicators(raw)
+            df_cache[sym]  = compute_indicators(raw, market_regime=spy_regime)
             print(f"    {sym:8s}  {len(raw)} 根 K 线", flush=True)
         except Exception as e:
             print(f"    {sym:8s}  跳过: {e}", flush=True)
@@ -91,7 +101,8 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0) -> dict:
             g_up, g_lo = compute_grid(df_is) if stype == "volatile_vol" else (0.0, 0.0)
             cfg = StrategyConfig(stock_type=stype, core_mode="auto",
                                  grid_upper=g_up, grid_lower=g_lo,
-                                 entry_signal="d_ma")
+                                 entry_signal="d_ma",
+                                 d_trend_min_mas=d_trend_min_mas)
             try:
                 trades, eq_series = run_backtest(df_oos, cfg)
             except Exception as e:
@@ -154,6 +165,49 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0) -> dict:
             ma20 = [{"time": _ts(t), "value": round(float(v), 4)}
                     for t, v in d_ma20_s.dropna().items()]
 
+            # MA60 / MA250：需要更长历史才能算准，从 df_full 完整历史算再截断
+            d_close_full = df_full.loc[:oos_e]["close"].resample("1D").last().dropna()
+            d_ma60_s  = d_close_full.rolling(60,  min_periods=40).mean()
+            d_ma250_s = d_close_full.rolling(250, min_periods=200).mean()
+            # 截断到展示范围
+            ma60  = [{"time": _ts(t), "value": round(float(v), 4)}
+                     for t, v in d_ma60_s.loc[ctx_start:oos_e].dropna().items()]
+            ma250 = [{"time": _ts(t), "value": round(float(v), 4)}
+                     for t, v in d_ma250_s.loc[ctx_start:oos_e].dropna().items()]
+
+            # 周K / 月K：用全量历史（更大视野）
+            def _ohlcv_resample(raw, freq, oos_ts):
+                """将 1H 原始数据重采样为周/月 OHLCV，带 is_context 标记"""
+                agg = raw[["open","high","low","close","volume"]].resample(
+                    freq, closed="left", label="left"
+                ).agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
+                result = []
+                for idx, row in agg.iterrows():
+                    result.append({
+                        "time":       _ts(idx),
+                        "open":       round(float(row["open"]),  4),
+                        "high":       round(float(row["high"]),  4),
+                        "low":        round(float(row["low"]),   4),
+                        "close":      round(float(row["close"]), 4),
+                        "volume":     int(row["volume"]),
+                        "is_context": _ts(idx) < oos_ts,
+                    })
+                return result
+
+            ohlcv_w = _ohlcv_resample(raw_full.loc[:oos_e], "W-MON", oob_ts)
+            ohlcv_m = _ohlcv_resample(raw_full.loc[:oos_e], "MS",    oob_ts)
+
+            # 周K MA
+            w_close = raw_full.loc[:oos_e]["close"].resample("W-MON", closed="left", label="left").last().dropna()
+            ma_w5  = [{"time":_ts(t),"value":round(float(v),4)} for t,v in w_close.rolling(5, min_periods=3).mean().dropna().items()]
+            ma_w10 = [{"time":_ts(t),"value":round(float(v),4)} for t,v in w_close.rolling(10,min_periods=7).mean().dropna().items()]
+            ma_w20 = [{"time":_ts(t),"value":round(float(v),4)} for t,v in w_close.rolling(20,min_periods=15).mean().dropna().items()]
+
+            # 月K MA
+            m_close = raw_full.loc[:oos_e]["close"].resample("MS").last().dropna()
+            ma_m5  = [{"time":_ts(t),"value":round(float(v),4)} for t,v in m_close.rolling(5, min_periods=3).mean().dropna().items()]
+            ma_m10 = [{"time":_ts(t),"value":round(float(v),4)} for t,v in m_close.rolling(10,min_periods=7).mean().dropna().items()]
+
             # ── 净值曲线（基准 100） ──────────────────────────────────────
             eq_pts  = [{"time": _ts(t), "value": round(v / ini * 100, 2)}
                        for t, v in eq_series.items()]
@@ -166,7 +220,8 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0) -> dict:
             BUY_ACTIONS  = {"CORE_BUY", "CORE_ADD", "T_BUY", "T_ADD"}
             SELL_ACTIONS = {"CORE_STOP", "CORE_CUT", "CORE_EOD", "T_TP", "T_STOP", "T_EOD"}
             LABEL_MAP    = {
-                "CORE_BUY": "C↑", "CORE_ADD": "C+", "T_BUY": "T↑", "T_ADD": "T+",
+                "CORE_BUY": "C↑", "CORE_ADD": "C+",
+                "T_BUY": "T↑", "T_ADD": "T+",
                 "CORE_STOP": "CS", "CORE_CUT": "C-", "CORE_EOD": "CE",
                 "T_TP": "TP", "T_STOP": "TS", "T_EOD": "TE",
             }
@@ -220,6 +275,15 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0) -> dict:
                 "ma5":          ma5,
                 "ma10":         ma10,
                 "ma20":         ma20,
+                "ma60":         ma60,
+                "ma250":        ma250,
+                "ohlcv_w":      ohlcv_w,
+                "ohlcv_m":      ohlcv_m,
+                "ma_w5":        ma_w5,
+                "ma_w10":       ma_w10,
+                "ma_w20":       ma_w20,
+                "ma_m5":        ma_m5,
+                "ma_m10":       ma_m10,
                 "equity":       eq_pts,
                 "hold":         hld_pts,
                 "markers":      markers,
@@ -233,7 +297,7 @@ def collect_data(wf_cfg: WFConfig, max_windows: int = 0) -> dict:
 
         all_windows.append({
             "id":       f"w{wi}",
-            "label":    f"OOS {oos_s[:7]}",
+            "label":    f"W{wi+1} {oos_s[:7]}～{oos_e[5:7]}",
             "is_start": is_s, "is_end": is_e,
             "oos_start": oos_s, "oos_end": oos_e,
             "params":   "baseline（当前策略）",
@@ -291,6 +355,12 @@ h1{font-size:20px;font-weight:700;padding:20px 24px 4px;color:#f0f4ff}
 .stab.active{background:#1e3a5f;color:#93c5fd;border-color:#3b82f6}
 .stab:hover:not(.active){background:#252d40}
 
+/* Chart view toggle buttons */
+.view-btns{display:flex;gap:4px;margin-bottom:6px}
+.vbtn{padding:3px 10px;border-radius:4px;cursor:pointer;font-size:11px;border:1px solid #2d3348;background:#1e2230;color:#8892a4}
+.vbtn.active{background:#1e3a5f;color:#93c5fd;border-color:#3b82f6}
+.vbtn:hover:not(.active){background:#252d40}
+
 /* Symbol panels */
 .spanel{display:none}
 .spanel.active{display:block}
@@ -306,6 +376,7 @@ h1{font-size:20px;font-weight:700;padding:20px 24px 4px;color:#f0f4ff}
 .kline-legend{display:flex;gap:12px;font-size:11px;margin-bottom:4px}
 .leg-item{display:flex;align-items:center;gap:4px}
 .leg-dot{width:10px;height:2px;border-radius:1px}
+.bottom-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
 .eq-wrap{background:#12151f;border:1px solid #2d3348;border-radius:8px;padding:10px}
 .eq-wrap h4{font-size:12px;color:#8892a4;margin-bottom:6px}
 
@@ -366,6 +437,7 @@ function buildUI() {
     const t = document.createElement('button');
     t.className = 'wtab' + (wi === 0 ? ' active' : '');
     t.textContent = w.label;
+    t.dataset.wid = w.id;
     t.onclick = () => switchWindow(w.id);
     tabsEl.appendChild(t);
 
@@ -406,6 +478,7 @@ function buildUI() {
       const typeTag = {'large_vol':'📈L','small_vol':'🔵S','volatile_vol':'🌊V'}[sd.stype] || sd.stype;
       st.className = 'stab' + (si === 0 ? ' active' : '');
       st.textContent = `${sym} ${typeTag}  ${a>=0?'+':''}${a.toFixed(1)}%`;
+      st.dataset.sym = sym;
       st.onclick = () => switchSymbol(w.id, sym);
       stabs.appendChild(st);
     });
@@ -451,12 +524,12 @@ function buildUI() {
                 <span class="leg-item" style="color:#f87171">▼ 卖出</span>
                 <span style="color:#3d4f6b;font-size:11px">| 灰色=IS背景</span>
               </div>
+              <div class="view-btns" id="vbtns-${pid}">
+                <button class="vbtn active" data-pid="${pid}" data-view="D" onclick="switchChartView('${pid}','D')">日K</button>
+                <button class="vbtn"        data-pid="${pid}" data-view="W" onclick="switchChartView('${pid}','W')">周K</button>
+                <button class="vbtn"        data-pid="${pid}" data-view="M" onclick="switchChartView('${pid}','M')">月K</button>
+              </div>
               <div id="kline-${pid}" style="height:360px"></div>
-            </div>
-            <div class="eq-wrap">
-              <h4>净值对比（基准=100）<span style="margin-left:12px;font-size:11px;color:#34d399">— 策略</span>
-                <span style="margin-left:8px;font-size:11px;color:#93c5fd">— 持有</span></h4>
-              <div id="eq-${pid}" style="height:130px"></div>
             </div>
           </div>
           <div>
@@ -483,13 +556,20 @@ function buildUI() {
             </div>
           </div>
         </div>
-        <div class="tlog-wrap">
-          <h4>交易记录（${sd.trade_log.length} 笔）</h4>
-          <div style="overflow-x:auto;max-height:220px;overflow-y:auto">
-            <table class="tlog">
-              <thead><tr><th>时间</th><th>操作</th><th>价格</th><th>盈亏</th><th>原因</th></tr></thead>
-              <tbody>${logRows || '<tr><td colspan="5" style="color:#8892a4;padding:20px;text-align:center">无交易记录</td></tr>'}</tbody>
-            </table>
+        <div class="bottom-row">
+          <div class="eq-wrap">
+            <h4>净值对比（基准=100）<span style="margin-left:12px;font-size:11px;color:#34d399">— 策略</span>
+              <span style="margin-left:8px;font-size:11px;color:#93c5fd">— 持有</span></h4>
+            <div id="eq-${pid}" style="height:200px"></div>
+          </div>
+          <div class="tlog-wrap">
+            <h4>交易记录（${sd.trade_log.length} 笔）</h4>
+            <div style="overflow-x:auto;max-height:230px;overflow-y:auto">
+              <table class="tlog">
+                <thead><tr><th>时间</th><th>操作</th><th>价格</th><th>盈亏</th><th>原因</th></tr></thead>
+                <tbody>${logRows || '<tr><td colspan="5" style="color:#8892a4;padding:20px;text-align:center">无交易记录</td></tr>'}</tbody>
+              </table>
+            </div>
           </div>
         </div>`;
 
@@ -508,9 +588,8 @@ function switchWindow(wid) {
   document.querySelectorAll('.wtab').forEach(el => el.classList.remove('active'));
   const sec = document.getElementById('wsec-' + wid);
   if (sec) sec.classList.add('active');
-  document.querySelectorAll('.wtab').forEach(el => {
-    if (el.onclick.toString().includes(`'${wid}'`)) el.classList.add('active');
-  });
+  const tab = document.querySelector(`.wtab[data-wid="${wid}"]`);
+  if (tab) tab.classList.add('active');
   // Init charts for first visible symbol
   const w = DATA.windows.find(x => x.id === wid);
   if (w) {
@@ -526,9 +605,8 @@ function switchSymbol(wid, sym) {
   sec.querySelectorAll('.stab').forEach(el => el.classList.remove('active'));
   const sp = document.getElementById(`sp-${wid}-${sym}`);
   if (sp) sp.classList.add('active');
-  sec.querySelectorAll('.stab').forEach(el => {
-    if (el.textContent.startsWith(sym)) el.classList.add('active');
-  });
+  const stab = sec.querySelector(`.stab[data-sym="${sym}"]`);
+  if (stab) stab.classList.add('active');
   ensureCharts(wid, sym);
 }
 
@@ -546,6 +624,8 @@ function ensureCharts(wid, sym) {
 }
 
 // ── K-line Chart ──────────────────────────────────────────────────────────
+const _chartReg = {};   // pid → { chart, isCandles, oosCandles, volSeries, ma5, ma10, ma20, ma60, ma250 }
+
 function createKlineChart(containerId, sd) {
   const el = document.getElementById(containerId);
   if (!el) return;
@@ -596,22 +676,24 @@ function createKlineChart(containerId, sd) {
   })));
 
   // MA5
-  if (sd.ma5.length) {
-    const ma5 = chart.addLineSeries({ color: '#f59e0b', lineWidth: 1, lastValueVisible: false, priceLineVisible: false });
-    ma5.setData(sd.ma5);
-  }
+  const ma5Ser = chart.addLineSeries({ color: '#f59e0b', lineWidth: 1, lastValueVisible: false, priceLineVisible: false });
+  if (sd.ma5 && sd.ma5.length) ma5Ser.setData(sd.ma5);
 
   // MA10
-  if (sd.ma10 && sd.ma10.length) {
-    const ma10 = chart.addLineSeries({ color: '#34d399', lineWidth: 1, lastValueVisible: false, priceLineVisible: false });
-    ma10.setData(sd.ma10);
-  }
+  const ma10Ser = chart.addLineSeries({ color: '#34d399', lineWidth: 1, lastValueVisible: false, priceLineVisible: false });
+  if (sd.ma10 && sd.ma10.length) ma10Ser.setData(sd.ma10);
 
   // MA20
-  if (sd.ma20.length) {
-    const ma20 = chart.addLineSeries({ color: '#8b5cf6', lineWidth: 1, lastValueVisible: false, priceLineVisible: false });
-    ma20.setData(sd.ma20);
-  }
+  const ma20Ser = chart.addLineSeries({ color: '#8b5cf6', lineWidth: 1, lastValueVisible: false, priceLineVisible: false });
+  if (sd.ma20 && sd.ma20.length) ma20Ser.setData(sd.ma20);
+
+  // MA60
+  const ma60Series = chart.addLineSeries({ color: '#fb923c', lineWidth: 1, lastValueVisible: false, priceLineVisible: false });
+  if (sd.ma60 && sd.ma60.length) ma60Series.setData(sd.ma60);
+
+  // MA250
+  const ma250Series = chart.addLineSeries({ color: '#f43f5e', lineWidth: 1, lastValueVisible: false, priceLineVisible: false });
+  if (sd.ma250 && sd.ma250.length) ma250Series.setData(sd.ma250);
 
   // 买卖标记
   if (sd.markers.length) {
@@ -620,10 +702,12 @@ function createKlineChart(containerId, sd) {
 
   // ── Hover Tooltip ────────────────────────────────────────────────────────
   // 构建 time → MA 值快查表
-  const ma5Map = {}, ma10Map = {}, ma20Map = {};
-  (sd.ma5  || []).forEach(d => { ma5Map[d.time]  = d.value; });
-  (sd.ma10 || []).forEach(d => { ma10Map[d.time] = d.value; });
-  (sd.ma20 || []).forEach(d => { ma20Map[d.time] = d.value; });
+  const ma5Map = {}, ma10Map = {}, ma20Map = {}, ma60Map = {}, ma250Map = {};
+  (sd.ma5   || []).forEach(d => { ma5Map[d.time]   = d.value; });
+  (sd.ma10  || []).forEach(d => { ma10Map[d.time]  = d.value; });
+  (sd.ma20  || []).forEach(d => { ma20Map[d.time]  = d.value; });
+  (sd.ma60  || []).forEach(d => { ma60Map[d.time]  = d.value; });
+  (sd.ma250 || []).forEach(d => { ma250Map[d.time] = d.value; });
   // 构建 day_ts → [trades] 快查表
   const tradeMap = {};
   (sd.trade_log || []).forEach(tr => {
@@ -669,11 +753,13 @@ function createKlineChart(containerId, sd) {
     </div>`;
 
     // MA 行
-    const m5  = ma5Map[t]  ? 'MA5:<b>' + ma5Map[t].toFixed(2)  + '</b>' : '';
-    const m10 = ma10Map[t] ? 'MA10:<b>' + ma10Map[t].toFixed(2) + '</b>' : '';
-    const m20 = ma20Map[t] ? 'MA20:<b>' + ma20Map[t].toFixed(2) + '</b>' : '';
-    const maHtml = (m5 || m10 || m20)
-      ? `<div class="tt-ma"><span>${m5}</span><span>${m10}</span><span>${m20}</span></div>`
+    const m5   = ma5Map[t]   ? 'MA5:<b>'   + ma5Map[t].toFixed(2)   + '</b>' : '';
+    const m10  = ma10Map[t]  ? 'MA10:<b>'  + ma10Map[t].toFixed(2)  + '</b>' : '';
+    const m20  = ma20Map[t]  ? 'MA20:<b>'  + ma20Map[t].toFixed(2)  + '</b>' : '';
+    const m60  = ma60Map[t]  ? 'MA60:<b>'  + ma60Map[t].toFixed(2)  + '</b>' : '';
+    const m250 = ma250Map[t] ? 'MA250:<b>' + ma250Map[t].toFixed(2) + '</b>' : '';
+    const maHtml = (m5 || m10 || m20 || m60 || m250)
+      ? `<div class="tt-ma"><span>${m5}</span><span>${m10}</span><span>${m20}</span><span>${m60}</span><span>${m250}</span></div>`
       : '';
 
     // 交易行（当日所有操作）
@@ -692,7 +778,74 @@ function createKlineChart(containerId, sd) {
     tooltip.style.display = 'block';
   });
 
+  // Store series refs for switchChartView
+  const _pid = containerId.replace('kline-', '');
+  _chartReg[_pid] = { chart, isCandles, oosCandles, volSeries, ma5: ma5Ser, ma10: ma10Ser, ma20: ma20Ser, ma60: ma60Series, ma250: ma250Series };
+
   chart.timeScale().fitContent();
+}
+
+// ── Switch Chart View (D/W/M) ─────────────────────────────────────────────
+function switchChartView(pid, view) {
+  // Update button states
+  document.querySelectorAll(`#vbtns-${pid} .vbtn`).forEach(b =>
+    b.classList.toggle('active', b.dataset.view === view));
+
+  const refs = _chartReg[pid];
+  if (!refs) return;
+
+  // Find sd from DATA
+  let sd = null;
+  for (const w of DATA.windows) {
+    for (const sym of DATA.sym_order) {
+      if (w.symbols[sym] && `${w.id}-${sym}` === pid) { sd = w.symbols[sym]; break; }
+    }
+    if (sd) break;
+  }
+  if (!sd) return;
+
+  const ohlcv  = view === 'D' ? sd.ohlcv   : (view === 'W' ? sd.ohlcv_w  : sd.ohlcv_m);
+  const maData = view === 'D'
+    ? { ma5: sd.ma5,   ma10: sd.ma10,  ma20: sd.ma20,  ma60: sd.ma60,  ma250: sd.ma250 }
+    : view === 'W'
+    ? { ma5: sd.ma_w5, ma10: sd.ma_w10,ma20: sd.ma_w20,ma60: [],       ma250: [] }
+    : { ma5: sd.ma_m5, ma10: sd.ma_m10,ma20: [],        ma60: [],       ma250: [] };
+
+  const toBar = d => ({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close });
+  refs.isCandles.setData(ohlcv.filter(d =>  d.is_context).map(toBar));
+  refs.oosCandles.setData(ohlcv.filter(d => !d.is_context).map(toBar));
+  refs.volSeries.setData(ohlcv.map(d => ({
+    time: d.time, value: d.volume,
+    color: d.is_context ? '#2d3a4a30' : (d.close >= d.open ? '#34d39940' : '#f8717140'),
+  })));
+
+  if (refs.ma5)   refs.ma5.setData(maData.ma5   || []);
+  if (refs.ma10)  refs.ma10.setData(maData.ma10  || []);
+  if (refs.ma20)  refs.ma20.setData(maData.ma20  || []);
+  if (refs.ma60)  refs.ma60.setData(maData.ma60  || []);
+  if (refs.ma250) refs.ma250.setData(maData.ma250|| []);
+
+  // Re-apply markers floored to correct bar granularity
+  function floorToWeek(ts) {
+    const d = new Date(ts * 1000);
+    const dow = d.getUTCDay();
+    d.setUTCDate(d.getUTCDate() + (dow === 0 ? -6 : 1 - dow));
+    d.setUTCHours(0, 0, 0, 0);
+    return Math.floor(d.getTime() / 1000);
+  }
+  function floorToMonth(ts) {
+    const d = new Date(ts * 1000);
+    d.setUTCDate(1); d.setUTCHours(0, 0, 0, 0);
+    return Math.floor(d.getTime() / 1000);
+  }
+  const floorFn = view === 'W' ? floorToWeek : (view === 'M' ? floorToMonth : null);
+  if (floorFn && sd.markers) {
+    refs.oosCandles.setMarkers(sd.markers.map(m => ({...m, time: floorFn(m.time)})));
+  } else if (sd.markers) {
+    refs.oosCandles.setMarkers(sd.markers);
+  }
+
+  refs.chart.timeScale().fitContent();
 }
 
 // ── Equity Chart (Lightweight Charts，与K线用同一库，无 adapter 依赖) ─────
@@ -710,7 +863,7 @@ function createEqChart(containerId, sd) {
     handleScale:  false,
   });
 
-  const fixedRange = () => ({ priceRange: { minValue: 60, maxValue: 150 } });
+  const fixedRange = () => ({ priceRange: { minValue: 80, maxValue: 140 } });
 
   const stratLine = chart.addLineSeries({
     color: '#34d399', lineWidth: 2,
@@ -718,6 +871,18 @@ function createEqChart(containerId, sd) {
     autoscaleInfoProvider: fixedRange,
   });
   stratLine.setData(sd.equity);
+
+  // 每5单位一条参考横线（10的倍数显示轴标，其余虚线辅助）
+  for (let lvl = 80; lvl <= 140; lvl += 5) {
+    stratLine.createPriceLine({
+      price: lvl,
+      color: lvl % 10 === 0 ? '#2d3550' : '#1c2235',
+      lineWidth: 1,
+      lineStyle: lvl % 10 === 0 ? LightweightCharts.LineStyle.Solid : LightweightCharts.LineStyle.Dotted,
+      axisLabelVisible: lvl % 10 === 0,
+      title: '',
+    });
+  }
 
   const holdLine = chart.addLineSeries({
     color: '#93c5fd', lineWidth: 2,
@@ -756,15 +921,18 @@ def main():
     parser = argparse.ArgumentParser(description="Walk-Forward HTML 报告生成器")
     parser.add_argument("--out",         type=str, default=str(DEFAULT_OUT))
     parser.add_argument("--is",          type=int, default=6,  dest="is_months")
-    parser.add_argument("--oos",         type=int, default=1,  dest="oos_months")
+    parser.add_argument("--oos",         type=int, default=2,  dest="oos_months")
     parser.add_argument("--step",        type=int, default=1,  dest="step_months")
-    parser.add_argument("--max-windows", type=int, default=0,  dest="max_windows",
+    parser.add_argument("--max-windows",    type=int, default=0,  dest="max_windows",
                         help="只跑前N个窗口（0=全跑）")
+    parser.add_argument("--d-trend-min-mas", type=int, default=4, dest="d_trend_min_mas",
+                        help="趋势过滤档位 2=MA5+MA10 3=+MA20 4=+MA30(默认) 5=+MA60")
     args = parser.parse_args()
 
     print("\n" + "═" * 60)
     print("  Walk-Forward HTML 报告生成器")
     print(f"  IS={args.is_months}月  OOS={args.oos_months}月  步进={args.step_months}月")
+    print(f"  趋势过滤档位: d_trend_min_mas={args.d_trend_min_mas}")
     if args.max_windows:
         print(f"  只生成前 {args.max_windows} 个窗口")
     print(f"  标的: {[s[0] for s in WF_SYMBOLS]}  (stock_type 动态分类)")
@@ -772,7 +940,8 @@ def main():
 
     cfg = WFConfig(is_months=args.is_months, oos_months=args.oos_months,
                    step_months=args.step_months)
-    data = collect_data(cfg, max_windows=args.max_windows)
+    data = collect_data(cfg, max_windows=args.max_windows,
+                        d_trend_min_mas=args.d_trend_min_mas)
     generate_report(data, Path(args.out))
 
 
