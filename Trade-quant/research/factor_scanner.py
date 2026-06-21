@@ -88,24 +88,30 @@ def _strip_tz(idx):
 
 
 def load_panel(symbols, tf="1d", since=None):
-    closes, vols = {}, {}
+    closes, highs, lows, vols = {}, {}, {}, {}
     missing = []
     for sym in symbols:
         path = DATA_DIR / f"{sym.lower()}_{tf}_raw.parquet"
         if not path.exists():
             missing.append(sym)
             continue
-        df = pd.read_parquet(path, columns=["close", "volume"])
+        df = pd.read_parquet(path, columns=["high", "low", "close", "volume"])
         df.index = _strip_tz(pd.to_datetime(df.index))
         if since:
             df = df.loc[since:]
         if len(df) < MIN_HISTORY:
             continue
         closes[sym] = df["close"]
+        highs[sym]  = df["high"]
+        lows[sym]   = df["low"]
         vols[sym]   = df["volume"]
     if missing:
         print(f"  [{len(missing)} 只缺数据，跳过]")
-    return pd.DataFrame(closes).sort_index(), pd.DataFrame(vols).sort_index()
+    idx = pd.DataFrame(closes).sort_index().index
+    return (pd.DataFrame(closes).reindex(idx),
+            pd.DataFrame(highs).reindex(idx),
+            pd.DataFrame(lows).reindex(idx),
+            pd.DataFrame(vols).reindex(idx))
 
 
 def load_benchmark(ticker, tf="1d", since=None):
@@ -162,7 +168,7 @@ def _rolling_lr_slope_r2(price_df, window=20):
     return pd.DataFrame(out, index=price_df.index, columns=price_df.columns)
 
 
-def compute_factors(close, vol, qqq_close):
+def compute_factors(close, high, low, vol, qqq_close):
     factors = {}
 
     # 时序动量：短期（5日）& 月度（20日）
@@ -186,6 +192,27 @@ def compute_factors(close, vol, qqq_close):
 
     # 线性回归动量：20日斜率 × R²，过滤单日暴涨噪音
     factors["LR_Slope"] = _rolling_lr_slope_r2(close, window=20)
+
+    # 布林带 %B：股价在布林带中的相对位置（超买/超卖）
+    std20 = close.rolling(20).std()
+    bb_upper = ma20 + 2 * std20
+    bb_lower = ma20 - 2 * std20
+    factors["BB_pct"] = (close - bb_lower) / (bb_upper - bb_lower).replace(0, np.nan)
+
+    # 成交量冲击：量比 × 价格方向（暴量上涨 vs 暴量下跌）
+    vol_ma20 = vol.rolling(20).mean().replace(0, np.nan)
+    vol_ratio = vol / vol_ma20
+    factors["Vol_Shock"] = vol_ratio * np.sign(close.pct_change())
+
+    # MFI（资金流量指数，14日）：综合价量的超买超卖指标
+    tp = (high + low + close) / 3          # 典型价格
+    rmf = tp * vol                          # 原始资金流
+    tp_chg = tp.diff()
+    pos_mf = rmf.where(tp_chg > 0, 0.0)
+    neg_mf = rmf.where(tp_chg < 0, 0.0)
+    pos_sum = pos_mf.rolling(14).sum()
+    neg_sum = neg_mf.rolling(14).sum().replace(0, np.nan)
+    factors["MFI_14"] = 100 - 100 / (1 + pos_sum / neg_sum)
 
     # Beta 调整残差动量：剔除大盘 Beta 后的个股独立强度
     # Beta = rolling 60日 cov(stock, QQQ) / var(QQQ)
@@ -682,6 +709,9 @@ def generate_html_report(
       <div class="term"><b>HV_ratio</b>短期÷长期波动率（近期异动程度）</div>
       <div class="term"><b>LR_Slope</b>20日线性回归斜率×R²，过滤单日暴涨噪音，比 Ret_20 平滑</div>
       <div class="term"><b>RS_Beta</b>个股20日收益 − Beta×QQQ收益，剔除大盘解释后的真实Alpha强度</div>
+      <div class="term"><b>BB_pct</b>布林带%B：股价在布林带中的相对位置，>1超买，&lt;0超卖（反转因子）</div>
+      <div class="term"><b>Vol_Shock</b>量比×价格方向：暴量上涨=正，暴量下跌=负（量价共振因子）</div>
+      <div class="term"><b>MFI_14</b>14日资金流量指数，综合价量，>80超买，&lt;20超卖（反转因子）</div>
 
       <h4>市场分期（背景色）</h4>
       <div class="term" style="line-height:1.8">
@@ -882,7 +912,7 @@ def main():
         symbols, _ = load_universe()
 
     print(f"加载 {len(symbols)} 只股票（since {args.since}）...")
-    close, vol = load_panel(symbols, args.tf, since=args.since)
+    close, high, low, vol = load_panel(symbols, args.tf, since=args.since)
     print(f"  有效标的: {close.shape[1]} 只  "
           f"{close.index[0].date()} ~ {close.index[-1].date()}")
 
@@ -894,7 +924,7 @@ def main():
     print(f"  流动性达标: {liquid_pct:.1f}%")
 
     print("计算因子...")
-    factors     = compute_factors(close, vol, qqq_close)
+    factors     = compute_factors(close, high, low, vol, qqq_close)
     fwd_returns = compute_forward_returns(close)
 
     print(f"IC 扫描（{len(factors)} 因子 × {len(HORIZONS)} 预测周期）...")
