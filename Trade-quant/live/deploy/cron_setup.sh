@@ -9,6 +9,7 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENV_DIR="$PROJECT_ROOT/venv"
 LOG_DIR="/var/log/trader"
 PYTHON_BIN="$VENV_DIR/bin/python"
+PIP_BIN="$VENV_DIR/bin/pip"
 
 echo "=============================="
 echo " Alpaca Trader GCP 部署向导"
@@ -16,23 +17,28 @@ echo " 项目路径：$PROJECT_ROOT"
 echo "=============================="
 
 # ---------- 1. 创建虚拟环境 ----------
+if [ -d "$VENV_DIR" ] && { [ ! -x "$PYTHON_BIN" ] || [ ! -x "$PIP_BIN" ]; }; then
+    echo "[1/5] 检测到虚拟环境不完整，重建..."
+    rm -rf "$VENV_DIR"
+fi
+
 if [ ! -d "$VENV_DIR" ]; then
     echo "[1/5] 创建 Python 虚拟环境..."
     python3 -m venv "$VENV_DIR"
 else
-    echo "[1/5] 虚拟环境已存在，跳过"
+    echo "[1/5] 虚拟环境已存在且完整，跳过"
 fi
 
 # ---------- 2. 安装依赖 ----------
 echo "[2/5] 安装 live 目录依赖..."
-"$VENV_DIR/bin/pip" install -q --upgrade pip
-"$VENV_DIR/bin/pip" install -q -r "$PROJECT_ROOT/requirements.txt"
+"$PYTHON_BIN" -m pip install -q --upgrade pip
+"$PYTHON_BIN" -m pip install -q -r "$PROJECT_ROOT/requirements.txt"
 
 # 研究模块依赖（factor_scanner / factor_combo_backtest）
 RESEARCH_REQ="$(dirname "$PROJECT_ROOT")/research/requirements.txt"
 if [ -f "$RESEARCH_REQ" ]; then
     echo "      安装 research 依赖..."
-    "$VENV_DIR/bin/pip" install -q -r "$RESEARCH_REQ"
+    "$PYTHON_BIN" -m pip install -q -r "$RESEARCH_REQ"
 fi
 
 # ---------- 3. 配置 .env ----------
