@@ -235,42 +235,65 @@ def run_experiment(z_panels, vol_shock, close, high, low, liquid_mask,
 
 # ── 扫描实验 ───────────────────────────────────────────────────────────────────
 
-def run_weight_scan(z_panels_base, vol_shock, close, high, low, liquid,
+def run_weight_scan(z_panels_bias20, vol_shock, close, high, low, liquid,
                     spy_close, qqq_close, spy_regime,
                     min_score, vol_min, top_n, rebalance):
-    """RS_Beta 权重从 0.20~0.60 扫描，LR_Slope 补足差额"""
-    print("  权重敏感度扫描...")
+    """RS_Beta 权重从 0.30~0.70 扫描（BIAS_20=-0.20 固定，基于 W_BIAS20 体系）"""
+    print("  RS_Beta 权重敏感度扫描（BIAS_20 体系）...")
     rows = []
-    for rs_w in np.round(np.arange(0.20, 0.65, 0.05), 2):
-        lr_w = round(0.70 - rs_w, 2)   # RS + LR 合计 = 0.70（固定 MFI=0.20 HV=0.10）
+    for rs_w in np.round(np.arange(0.30, 0.75, 0.05), 2):
         weights = {
-            1:  {"RS_Beta": rs_w, "MFI_14": 0.20, "LR_Slope": lr_w, "HV_ratio": 0.10},
-            -1: W_BASELINE[-1],
-            0:  W_BASELINE[0],
+            1:  {"RS_Beta": rs_w, "MFI_14": 0.20, "BIAS_20": -0.20, "HV_ratio": 0.10},
+            -1: W_BIAS20[-1],
+            0:  W_BIAS20[0],
         }
         eq, _, _, ret, _ = run_experiment(
-            z_panels_base, vol_shock, close, high, low, liquid,
+            z_panels_bias20, vol_shock, close, high, low, liquid,
             spy_close, qqq_close, spy_regime, weights,
             min_score=min_score, vol_min=vol_min,
             top_n=top_n, rebalance=rebalance,
         )
-        r = perf_stats_raw(eq, ret, f"RS={rs_w:.2f} LR={lr_w:.2f}")
+        r = perf_stats_raw(eq, ret, f"RS={rs_w:.2f} BIAS=−0.20")
         r["RS_w"] = rs_w
         rows.append(r)
     return pd.DataFrame(rows)
 
 
-def run_threshold_scan(z_panels_base, vol_shock, close, high, low, liquid,
+def run_bias_scan(z_panels_bias20, vol_shock, close, high, low, liquid,
+                  spy_close, qqq_close, spy_regime,
+                  min_score, vol_min, top_n, rebalance):
+    """BIAS_20 牛市权重从 -0.05~-0.40 扫描（RS_Beta=0.50 固定）"""
+    print("  BIAS_20 权重敏感度扫描...")
+    rows = []
+    for bias_w in np.round(np.arange(-0.05, -0.45, -0.05), 2):
+        weights = {
+            1:  {"RS_Beta": 0.50, "MFI_14": 0.20, "BIAS_20": bias_w, "HV_ratio": 0.10},
+            -1: W_BIAS20[-1],
+            0:  W_BIAS20[0],
+        }
+        eq, _, _, ret, _ = run_experiment(
+            z_panels_bias20, vol_shock, close, high, low, liquid,
+            spy_close, qqq_close, spy_regime, weights,
+            min_score=min_score, vol_min=vol_min,
+            top_n=top_n, rebalance=rebalance,
+        )
+        r = perf_stats_raw(eq, ret, f"BIAS={bias_w:.2f}")
+        r["bias_w"] = bias_w
+        rows.append(r)
+    return pd.DataFrame(rows)
+
+
+def run_threshold_scan(z_panels_bias20, vol_shock, close, high, low, liquid,
                        spy_close, qqq_close, spy_regime,
                        top_n, rebalance):
-    """Combo 门槛 × Vol 门槛 二维扫描"""
-    print("  门槛敏感度扫描...")
+    """Combo 门槛 × Vol 门槛 二维扫描（基于 W_BIAS20 体系）"""
+    print("  门槛敏感度扫描（BIAS_20 体系）...")
     rows = []
     for min_s in [0.5, 1.0, 1.5, 2.0]:
         for vol_m in [1.0, 1.2, 1.5]:
             eq, _, _, ret, _ = run_experiment(
-                z_panels_base, vol_shock, close, high, low, liquid,
-                spy_close, qqq_close, spy_regime, W_BASELINE,
+                z_panels_bias20, vol_shock, close, high, low, liquid,
+                spy_close, qqq_close, spy_regime, W_BIAS20,
                 min_score=min_s, vol_min=vol_m,
                 top_n=top_n, rebalance=rebalance,
             )
@@ -281,15 +304,15 @@ def run_threshold_scan(z_panels_base, vol_shock, close, high, low, liquid,
     return pd.DataFrame(rows)
 
 
-def run_holdout(z_panels_base, vol_shock, close, high, low, liquid,
+def run_holdout(z_panels_bias20, vol_shock, close, high, low, liquid,
                 spy_close, qqq_close, spy_regime,
                 min_score, vol_min, top_n, rebalance,
                 split="2025-01-01"):
-    """样本内（2022-24）vs 样本外（2025-26）一致性检验"""
-    print("  Hold-out 验证...")
+    """样本内（2022-24）vs 样本外（2025-26）一致性检验（基于 W_BIAS20 体系）"""
+    print("  Hold-out 验证（BIAS_20 体系）...")
     eq_full, _, _, ret_full, _ = run_experiment(
-        z_panels_base, vol_shock, close, high, low, liquid,
-        spy_close, qqq_close, spy_regime, W_BASELINE,
+        z_panels_bias20, vol_shock, close, high, low, liquid,
+        spy_close, qqq_close, spy_regime, W_BIAS20,
         min_score=min_score, vol_min=vol_min,
         top_n=top_n, rebalance=rebalance,
     )
@@ -314,16 +337,16 @@ def run_holdout(z_panels_base, vol_shock, close, high, low, liquid,
     return [stats_is, stats_oos, stats_spy_is, stats_spy_oos]
 
 
-def run_topn_scan(z_panels_base, vol_shock, close, high, low, liquid,
+def run_topn_scan(z_panels_bias20, vol_shock, close, high, low, liquid,
                   spy_close, qqq_close, regime,
                   min_score, vol_min, rebalance):
-    """持仓数量 Top-N 扫描（3/5/7/10/15）"""
-    print("  Top-N 持仓数扫描...")
+    """持仓数量 Top-N 扫描（3/5/7/10/15，基于 W_BIAS20 体系）"""
+    print("  Top-N 持仓数扫描（BIAS_20 体系）...")
     rows = []
     for n in [3, 5, 7, 10, 15]:
         eq, _, _, ret, _ = run_experiment(
-            z_panels_base, vol_shock, close, high, low, liquid,
-            spy_close, qqq_close, regime, W_BASELINE,
+            z_panels_bias20, vol_shock, close, high, low, liquid,
+            spy_close, qqq_close, regime, W_BIAS20,
             min_score=min_score, vol_min=vol_min,
             top_n=n, rebalance=rebalance,
         )
@@ -403,7 +426,7 @@ def plot_comparison(exp_dict, spy_eq, qqq_eq, out_path):
 
 
 def plot_weight_scan(df_scan, out_path):
-    """权重扫描结果：Sharpe / 年化收益 / 最大回撤随 RS_Beta 权重变化"""
+    """权重扫描结果：Sharpe / 年化收益 / 最大回撤随 RS_Beta 权重变化（BIAS_20 体系）"""
     fig, axes = _dark_fig(3, (12, 9))
     ax_s, ax_c, ax_d = axes
     xs = df_scan["RS_w"].values
@@ -420,12 +443,42 @@ def plot_weight_scan(df_scan, out_path):
         ax.scatter([xs[best_i]], [ys[best_i]], color=color, s=80, zorder=5)
         ax.set_ylabel(label, color=_TEXT_CLR)
         ax.set_xlabel("RS_Beta 牛市权重", color=_TEXT_CLR)
-        ax.axvline(0.40, color="#8b949e", lw=0.8, ls=":", alpha=0.5, label="Baseline=0.40")
+        ax.axvline(0.50, color="#8b949e", lw=0.8, ls=":", alpha=0.5, label="当前=0.50")
         ax.legend(facecolor=_DARK_AX, labelcolor=_TEXT_CLR, edgecolor=_GRID_CLR, fontsize=8)
         ax.grid(alpha=0.15, color=_GRID_CLR)
         ax.tick_params(colors=_TEXT_CLR)
 
-    plt.suptitle("RS_Beta 牛市权重敏感度扫描（LR_Slope 补足差额至0.70）",
+    plt.suptitle("RS_Beta 牛市权重敏感度扫描（BIAS_20=−0.20 固定，MFI=0.20 HV=0.10）",
+                 fontsize=10, color="#8b949e")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=_DARK_BG)
+    plt.close()
+
+
+def plot_bias_scan(df_scan, out_path):
+    """BIAS_20 牛市权重敏感度扫描图（RS_Beta=0.50 固定）"""
+    fig, axes = _dark_fig(3, (12, 9))
+    ax_s, ax_c, ax_d = axes
+    xs = df_scan["bias_w"].values   # 负数，从 -0.05 到 -0.40
+
+    for ax, col, label, color in [
+        (ax_s, "Sharpe",   "Sharpe 比率",  "#ffd60a"),
+        (ax_c, "年化收益", "年化收益",      "#39d353"),
+        (ax_d, "最大回撤", "最大回撤（负）", "#f85149"),
+    ]:
+        ys = df_scan[col].values
+        ax.plot(xs, ys, color=color, lw=2, marker="o", markersize=6)
+        best_i = np.argmax(ys) if col != "最大回撤" else np.argmax(ys)
+        ax.axvline(xs[best_i], color=color, lw=0.8, ls="--", alpha=0.6)
+        ax.scatter([xs[best_i]], [ys[best_i]], color=color, s=80, zorder=5)
+        ax.set_ylabel(label, color=_TEXT_CLR)
+        ax.set_xlabel("BIAS_20 牛市权重（负 = 惩罚过热）", color=_TEXT_CLR)
+        ax.axvline(-0.20, color="#8b949e", lw=0.8, ls=":", alpha=0.5, label="当前=−0.20")
+        ax.legend(facecolor=_DARK_AX, labelcolor=_TEXT_CLR, edgecolor=_GRID_CLR, fontsize=8)
+        ax.grid(alpha=0.15, color=_GRID_CLR)
+        ax.tick_params(colors=_TEXT_CLR)
+
+    plt.suptitle("BIAS_20 牛市权重敏感度扫描（RS_Beta=0.50 固定，曲线越平坦越鲁棒）",
                  fontsize=10, color="#8b949e")
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=_DARK_BG)
@@ -461,12 +514,13 @@ def _row_color(stats, baseline_stats, col):
     return "color:#39d353;font-weight:700" if better else "color:#f85149"
 
 
-def generate_report(main_stats, scan_w, scan_t, scan_n, holdout_stats,
-                    cmp_img, wscan_img, out_path):
+def generate_report(main_stats, scan_w, scan_bias, scan_t, scan_n, holdout_stats,
+                    cmp_img, wscan_img, bscan_img, out_path):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    cmp_b64   = _b64(cmp_img)
-    wscan_b64 = _b64(wscan_img)
-    baseline  = main_stats[0]   # Baseline 永远是第一行
+    cmp_b64    = _b64(cmp_img)
+    wscan_b64  = _b64(wscan_img)
+    bscan_b64  = _b64(bscan_img)
+    baseline   = main_stats[0]   # Baseline 永远是第一行
 
     # 主实验表
     cols_main = ["实验", "总收益", "年化收益", "年化波动", "Sharpe", "最大回撤", "Calmar"]
@@ -489,7 +543,7 @@ def generate_report(main_stats, scan_w, scan_t, scan_n, holdout_stats,
     wscan_body = ""
     best_sharpe_i = scan_w["Sharpe"].idxmax()
     for i, row in scan_w.iterrows():
-        is_base = abs(row.get("RS_w", 99) - 0.40) < 0.01
+        is_base = abs(row.get("RS_w", 99) - 0.50) < 0.01
         is_best = (i == best_sharpe_i)
         style_row = ' style="background:#1f2d1f"' if is_base else (
                     ' style="background:#0d2f0d"' if is_best else "")
@@ -530,6 +584,21 @@ def generate_report(main_stats, scan_w, scan_t, scan_n, holdout_stats,
             v = row.get(c, np.nan)
             cells += f"<td>{_fmt(v, c)}</td>"
         topn_body += f"<tr{style_row}>{cells}</tr>"
+
+    # BIAS_20 扫描表
+    bscan_body = ""
+    best_bias_i = scan_bias["Sharpe"].idxmax()
+    for i, row in scan_bias.iterrows():
+        is_base = abs(row.get("bias_w", 99) - (-0.20)) < 0.01
+        is_best = (i == best_bias_i)
+        style_row = (' style="background:#0d2f0d;font-weight:700"' if is_best
+                     else ' style="background:#1f2d1f"' if is_base else "")
+        tag = "★最优" if is_best else ("(当前)" if is_base else "")
+        cells = f"<td>{row['bias_w']:.2f}{tag}</td>"
+        for c in ["年化收益", "Sharpe", "最大回撤", "Calmar"]:
+            v = row.get(c, np.nan)
+            cells += f"<td>{_fmt(v, c)}</td>"
+        bscan_body += f"<tr{style_row}>{cells}</tr>"
 
     # Hold-out 表
     ho_header = "".join(f"<th>{c}</th>" for c in cols_main)
@@ -590,7 +659,7 @@ def generate_report(main_stats, scan_w, scan_t, scan_n, holdout_stats,
   <div class="note">
     <b>实验说明（第二轮，Baseline = QQQ MA50 + 原权重）：</b><br>
     <span class="tag" style="background:#2d2800;color:#ffd60a">Baseline</span>
-    QQQ MA50 状态开关 + RS_Beta×0.4 + LR_Slope×0.3 + MFI_14×0.2 + HV_ratio×0.1（主脚本当前版本）<br>
+    QQQ MA50 状态开关 + RS_Beta×0.4 + LR_Slope×0.3 + MFI_14×0.2 + HV_ratio×0.1（旧主脚本，对照组）<br>
     <span class="tag" style="background:#2d0a0a;color:#f85149">Exp-A</span>
     BIAS_20 替换 LR_Slope（在新基准上能否继续改善？）<br>
     <span class="tag" style="background:#0a1a2d;color:#79c0ff">Exp-B</span>
@@ -617,30 +686,39 @@ def generate_report(main_stats, scan_w, scan_t, scan_n, holdout_stats,
   <h2>2. 净值曲线 & 回撤对比</h2>
   <img src="data:image/png;base64,{cmp_b64}" alt="净值曲线对比">
 
-  <h2>3. 权重敏感度扫描</h2>
-  <p class="sub">RS_Beta 牛市权重从 0.20 到 0.60 扫描，LR_Slope 补足（RS+LR=0.70）。
-  曲线若是"山峰"则参数脆弱；若是"高原"则鲁棒。</p>
-  <img src="data:image/png;base64,{wscan_b64}" alt="权重敏感度">
+  <h2>3. RS_Beta 权重敏感度扫描（BIAS_20 体系）</h2>
+  <p class="sub">RS_Beta 牛市权重从 0.30 到 0.70 扫描，BIAS_20=−0.20 固定。
+  曲线若是"山峰"则参数脆弱；若是"高原"则鲁棒。黑底=当前值（0.50）。</p>
+  <img src="data:image/png;base64,{wscan_b64}" alt="RS_Beta权重敏感度">
   <table>
     <thead><tr>{wscan_header}</tr></thead>
     <tbody>{wscan_body}</tbody>
   </table>
 
-  <h2>4. 门槛敏感度（Sharpe 矩阵）</h2>
+  <h2>4. BIAS_20 权重敏感度扫描</h2>
+  <p class="sub">BIAS_20 牛市权重从 −0.05 到 −0.40 扫描，RS_Beta=0.50 固定。
+  负值越大 = 对过热股惩罚越重。黑底=当前值（−0.20）。</p>
+  <img src="data:image/png;base64,{bscan_b64}" alt="BIAS_20权重敏感度">
+  <table>
+    <thead><tr><th>BIAS_20 权重</th><th>年化收益</th><th>Sharpe</th><th>最大回撤</th><th>Calmar</th></tr></thead>
+    <tbody>{bscan_body}</tbody>
+  </table>
+
+  <h2>5. 门槛敏感度（Sharpe 矩阵）</h2>
   <p class="sub">行=Combo 门槛，列=量比门槛。★ = 最高 Sharpe，黑底 = Baseline 位置</p>
   <table>
     <thead><tr>{thresh_header}</tr></thead>
     <tbody>{thresh_body}</tbody>
   </table>
 
-  <h2>5. 持仓数量（Top-N）扫描</h2>
+  <h2>6. 持仓数量（Top-N）扫描（BIAS_20 体系）</h2>
   <p class="sub">持仓越少集中度越高；越多分散但会稀释 alpha。找 Sharpe 最优的持仓数量。</p>
   <table>
     <thead><tr><th>持仓数</th><th>总收益</th><th>年化收益</th><th>年化波动</th><th>Sharpe</th><th>最大回撤</th><th>Calmar</th></tr></thead>
     <tbody>{topn_body}</tbody>
   </table>
 
-  <h2>6. Hold-out 样本外验证</h2>
+  <h2>7. Hold-out 样本外验证（BIAS_20 体系）</h2>
   <p class="sub">用 IS（2022-2024）调好参数，在 OOS（2025-2026）盲跑。
   若 OOS Sharpe/回撤 与 IS 差距 &lt;30%，说明策略泛化能力较好。</p>
   <table>
@@ -743,17 +821,21 @@ def main():
         top_n=args.top_n, rebalance=args.rebalance,
     )
     scan_w = run_weight_scan(
-        z_base, min_score=args.min_score, vol_min=args.vol_min,
+        z_bias20, min_score=args.min_score, vol_min=args.vol_min,
         spy_regime=qqq_regime, **scan_kw,
     )
-    scan_t = run_threshold_scan(z_base, spy_regime=qqq_regime, **scan_kw)
+    scan_bias = run_bias_scan(
+        z_bias20, min_score=args.min_score, vol_min=args.vol_min,
+        spy_regime=qqq_regime, **scan_kw,
+    )
+    scan_t = run_threshold_scan(z_bias20, spy_regime=qqq_regime, **scan_kw)
     scan_n = run_topn_scan(
-        z_base, vol_shock, close, high, low, liquid,
+        z_bias20, vol_shock, close, high, low, liquid,
         spy_close, qqq_close, qqq_regime,
         args.min_score, args.vol_min, args.rebalance,
     )
     holdout_stats = run_holdout(
-        z_base, vol_shock, close, high, low, liquid,
+        z_bias20, vol_shock, close, high, low, liquid,
         spy_close, qqq_close, qqq_regime,
         args.min_score, args.vol_min, args.top_n, args.rebalance,
         split=args.holdout_split,
@@ -775,9 +857,12 @@ def main():
     print("=" * 82)
 
     best_w_idx = scan_w["Sharpe"].idxmax()
-    print(f"\n权重扫描最优 Sharpe={scan_w.loc[best_w_idx,'Sharpe']:.2f} "
+    print(f"\nRS_Beta 权重扫描最优 Sharpe={scan_w.loc[best_w_idx,'Sharpe']:.2f} "
           f"（RS_Beta={scan_w.loc[best_w_idx,'RS_w']:.2f}）")
-    print("\nTop-N 扫描：")
+    best_b_idx = scan_bias["Sharpe"].idxmax()
+    print(f"BIAS_20 权重扫描最优 Sharpe={scan_bias.loc[best_b_idx,'Sharpe']:.2f} "
+          f"（BIAS_20={scan_bias.loc[best_b_idx,'bias_w']:.2f}）")
+    print("\nTop-N 扫描（BIAS_20 体系）：")
     for _, r in scan_n.iterrows():
         print(f"  Top-{int(r['top_n']):<3} Sharpe={r['Sharpe']:.2f}  "
               f"年化={r['年化收益']:.1%}  MaxDD={r['最大回撤']:.1%}")
@@ -787,10 +872,12 @@ def main():
 
     # ── 图表 ──────────────────────────────────────────────────────────────────
     print("\n生成图表...")
-    cmp_path   = REPORT_DIR / "optimize_comparison.png"
-    wscan_path = REPORT_DIR / "optimize_weight_scan.png"
+    cmp_path    = REPORT_DIR / "optimize_comparison.png"
+    wscan_path  = REPORT_DIR / "optimize_weight_scan.png"
+    bscan_path  = REPORT_DIR / "optimize_bias_scan.png"
     plot_comparison(equity_dict, spy_eq, qqq_eq, cmp_path)
     plot_weight_scan(scan_w, wscan_path)
+    plot_bias_scan(scan_bias, bscan_path)
 
     # ── HTML 报告 ─────────────────────────────────────────────────────────────
     spy_ret_s = spy_close.pct_change().reindex(close.index).fillna(0)
@@ -802,8 +889,8 @@ def main():
 
     html_path = REPORT_DIR / "combo_optimize_report.html"
     generate_report(
-        main_stats, scan_w, scan_t, scan_n, holdout_stats,
-        cmp_path, wscan_path, html_path,
+        main_stats, scan_w, scan_bias, scan_t, scan_n, holdout_stats,
+        cmp_path, wscan_path, bscan_path, html_path,
     )
     print(f"\n全部输出 → {REPORT_DIR}/")
     print(f"  用浏览器打开: open {html_path}")
