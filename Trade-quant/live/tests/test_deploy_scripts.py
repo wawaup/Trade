@@ -4,6 +4,7 @@ from pathlib import Path
 
 LIVE_DIR = Path(__file__).resolve().parents[1]
 CRON_SETUP = LIVE_DIR / "deploy" / "cron_setup.sh"
+REQUIREMENTS = LIVE_DIR / "requirements.txt"
 
 
 class DeployScriptTests(unittest.TestCase):
@@ -21,6 +22,12 @@ class DeployScriptTests(unittest.TestCase):
         self.assertNotIn('RESEARCH_REQ="$(dirname "$PROJECT_ROOT")/research/requirements.txt"', content)
         self.assertNotIn('-r "$RESEARCH_REQ"', content)
         self.assertIn("live 交易脚本不默认安装完整 research 依赖", content)
+
+    def test_live_requirements_include_research_runtime_imports(self):
+        content = REQUIREMENTS.read_text(encoding="utf-8")
+
+        self.assertIn("matplotlib", content)
+        self.assertIn("scipy", content)
 
 
 if __name__ == "__main__":
