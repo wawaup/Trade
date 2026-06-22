@@ -95,6 +95,57 @@ def compute_atr(close, high, low, window=14):
     return tr.rolling(window).mean()
 
 
+def compute_adx(close, high, low, period=14):
+    """
+    Average Directional Index（ADX），向量化 DataFrame 版。
+    返回范围 [0, 100]：>25 = 有效趋势，<20 = 横盘震荡。
+    采用 Wilder 平滑（EWM，α=1/period）。
+    """
+    prev_high  = high.shift(1)
+    prev_low   = low.shift(1)
+    prev_close = close.shift(1)
+
+    # True Range（取三种计算中最大值）
+    tr = pd.DataFrame(
+        np.maximum(
+            np.maximum((high - low).values, (high - prev_close).abs().values),
+            (low - prev_close).abs().values,
+        ),
+        index=close.index, columns=close.columns,
+    )
+
+    # 方向动量（+DM / -DM）
+    up_move   = high - prev_high
+    down_move = prev_low - low
+
+    plus_dm = pd.DataFrame(
+        np.where(
+            (up_move.values > down_move.values) & (up_move.values > 0),
+            up_move.values, 0.0,
+        ),
+        index=close.index, columns=close.columns,
+    )
+    minus_dm = pd.DataFrame(
+        np.where(
+            (down_move.values > up_move.values) & (down_move.values > 0),
+            down_move.values, 0.0,
+        ),
+        index=close.index, columns=close.columns,
+    )
+
+    alpha = 1.0 / period
+    atr14    = tr.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
+    plus_di  = (100 * plus_dm.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
+                / atr14.replace(0, np.nan))
+    minus_di = (100 * minus_dm.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
+                / atr14.replace(0, np.nan))
+
+    dx_sum = (plus_di + minus_di).replace(0, np.nan)
+    dx     = 100 * (plus_di - minus_di).abs() / dx_sum
+    adx    = dx.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
+    return adx
+
+
 def compute_qqq_regime(qqq_close, ma_window=50, buffer=0.0):
     """QQQ MA50 快速状态开关（buffer=0 = 无缓冲，更灵敏）"""
     ma = qqq_close.rolling(ma_window).mean()
@@ -131,13 +182,17 @@ def perf_stats_raw(equity, ret_series, label=""):
 def run_experiment(z_panels, vol_shock, close, high, low, liquid_mask,
                    spy_close, qqq_close, regime, weights,
                    min_score=1.0, vol_min=1.2, top_n=5, rebalance=5,
-                   atr_stop_mult=None, friction=0.0):
+                   atr_stop_mult=None, friction=0.0,
+                   adx_min=None):
     """
     通用实验回测：接受任意 z_panels / regime / weights。
 
     atr_stop_mult : 非 None 时开启 ATR 追踪止损（每日检查）。
     friction      : 单边摩擦成本率（手续费+滑点），调仓日按换手比例扣减。
                     0.0010 = 0.1% 单边（轻），0.0025 = 0.25% 单边（保守实盘）。
+    adx_min       : 非 None 时开启 ADX14 趋势确认过滤（如 adx_min=25）；
+                    在函数内部用 close/high/low 计算 ADX14，调仓日
+                    仅当个股 ADX14 >= adx_min 时才可入选，震荡横盘股排除。
     """
     combo   = compute_combo_generic(z_panels, regime, weights)
     dates   = close.index
@@ -150,7 +205,8 @@ def run_experiment(z_panels, vol_shock, close, high, low, liquid_mask,
     entry_prices = {}
     trade_log    = []
 
-    atr14 = compute_atr(close, high, low, 14) if atr_stop_mult else None
+    atr14  = compute_atr(close, high, low, 14) if atr_stop_mult else None
+    adx14  = compute_adx(close, high, low, 14) if (adx_min is not None) else None
 
     for i, date in enumerate(dates):
         if i == 0:
@@ -186,10 +242,16 @@ def run_experiment(z_panels, vol_shock, close, high, low, liquid_mask,
                       if prev in liquid_mask.index
                       else pd.Series(True, index=scores.index))
 
+            adx_mask = pd.Series(True, index=scores.index)
+            if adx14 is not None and prev in adx14.index:
+                adx_row  = adx14.loc[prev].reindex(scores.index)
+                adx_mask = adx_row >= adx_min
+
             valid = scores[
                 lm.reindex(scores.index, fill_value=False) &
                 (scores > min_score) &
-                (vs.reindex(scores.index, fill_value=0) > vol_min)
+                (vs.reindex(scores.index, fill_value=0) > vol_min) &
+                adx_mask.fillna(False)
             ].dropna()
 
             top   = valid.nlargest(top_n)
@@ -365,6 +427,9 @@ PALETTE = [
     "#39d353",  # Exp-C      绿
     "#ff7b72",  # Exp-D      橙红
     "#d2a8ff",  # Exp-E      紫
+    "#a5d6ff",  # Exp-F0     淡蓝灰
+    "#c9d1d9",  # Exp-F1     灰
+    "#e3b341",  # Exp-G ADX  橙金
     "#58a6ff",  # SPY        淡蓝
     "#3fb950",  # QQQ        淡绿
 ]
@@ -673,7 +738,9 @@ def generate_report(main_stats, scan_w, scan_bias, scan_t, scan_n, holdout_stats
     <span class="tag" style="background:#0a1a0a;color:#3fb950">Exp-F0</span>
     摩擦成本轻度：手续费 0.1% 单边（约 IBKR 散户水平）<br>
     <span class="tag" style="background:#0a1a0a;color:#3fb950">Exp-F1</span>
-    摩擦成本保守：手续费+滑点 0.25% 单边（实盘保守估计）
+    摩擦成本保守：手续费+滑点 0.25% 单边（实盘保守估计）<br>
+    <span class="tag" style="background:#2d1f00;color:#e3b341">Exp-G</span>
+    ADX14 &gt; 25 趋势确认过滤（基于 Exp-A/W_BIAS20，仅趋势明确个股入选，排除横盘震荡）
   </div>
 
   <h2>1. 主实验对比</h2>
@@ -789,26 +856,27 @@ def main():
         top_n=args.top_n, rebalance=args.rebalance,
     )
 
-    # (name, z_panels, regime, weights, atr_stop_mult, friction)
+    # (name, z_panels, regime, weights, atr_stop_mult, friction, adx_min)
     experiments_cfg = [
-        ("Baseline (QQQ MA50)", z_base,   qqq_regime, W_BASELINE,  None, 0.0),
-        ("Exp-A: BIAS_20",      z_bias20, qqq_regime, W_BIAS20,    None, 0.0),
-        ("Exp-B: 合成动量",     z_base,   qqq_regime, W_COMPOSITE, None, 0.0),
-        ("Exp-D: ATR止损",      z_base,   qqq_regime, W_BASELINE,  2.5,  0.0),
-        ("Exp-E: A+D",          z_bias20, qqq_regime, W_BIAS20,    2.5,  0.0),
-        ("Exp-F0: 手续费0.1%",  z_base,   qqq_regime, W_BASELINE,  None, 0.001),
-        ("Exp-F1: 滑点+费0.25%",z_base,   qqq_regime, W_BASELINE,  None, 0.0025),
+        ("Baseline (QQQ MA50)", z_base,   qqq_regime, W_BASELINE,  None, 0.0,   None),
+        ("Exp-A: BIAS_20",      z_bias20, qqq_regime, W_BIAS20,    None, 0.0,   None),
+        ("Exp-B: 合成动量",     z_base,   qqq_regime, W_COMPOSITE, None, 0.0,   None),
+        ("Exp-D: ATR止损",      z_base,   qqq_regime, W_BASELINE,  2.5,  0.0,   None),
+        ("Exp-E: A+D",          z_bias20, qqq_regime, W_BIAS20,    2.5,  0.0,   None),
+        ("Exp-F0: 手续费0.1%",  z_base,   qqq_regime, W_BASELINE,  None, 0.001, None),
+        ("Exp-F1: 滑点+费0.25%",z_base,   qqq_regime, W_BASELINE,  None, 0.0025,None),
+        ("Exp-G: ADX>25",       z_bias20, qqq_regime, W_BIAS20,    None, 0.0,   25),
     ]
 
     main_stats  = []
     equity_dict = {}
     spy_eq = qqq_eq = None
 
-    for name, zp, regime, weights, atr_mult, fric in experiments_cfg:
+    for name, zp, regime, weights, atr_mult, fric, adx_thr in experiments_cfg:
         print(f"  {name}...")
         eq, spy_eq, qqq_eq, ret, _ = run_experiment(
             z_panels=zp, regime=regime, weights=weights,
-            atr_stop_mult=atr_mult, friction=fric, **common_kw,
+            atr_stop_mult=atr_mult, friction=fric, adx_min=adx_thr, **common_kw,
         )
         main_stats.append(perf_stats_raw(eq, ret, name))
         equity_dict[name] = eq
