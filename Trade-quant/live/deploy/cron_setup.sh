@@ -33,13 +33,7 @@ fi
 echo "[2/5] 安装 live 目录依赖..."
 "$PYTHON_BIN" -m pip install -q --upgrade pip
 "$PYTHON_BIN" -m pip install -q -r "$PROJECT_ROOT/requirements.txt"
-
-# 研究模块依赖（factor_scanner / factor_combo_backtest）
-RESEARCH_REQ="$(dirname "$PROJECT_ROOT")/research/requirements.txt"
-if [ -f "$RESEARCH_REQ" ]; then
-    echo "      安装 research 依赖..."
-    "$PYTHON_BIN" -m pip install -q -r "$RESEARCH_REQ"
-fi
+echo "      live 交易脚本不默认安装完整 research 依赖（vectorbt/quantstats/jupyter/pandas-ta 等仅用于本地研究）"
 
 # ---------- 3. 配置 .env ----------
 echo "[3/5] 检查 .env 配置..."

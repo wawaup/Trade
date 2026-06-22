@@ -15,6 +15,13 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn('rm -rf "$VENV_DIR"', content)
         self.assertIn('"$PYTHON_BIN" -m pip install -q --upgrade pip', content)
 
+    def test_cron_setup_does_not_install_full_research_requirements_by_default(self):
+        content = CRON_SETUP.read_text(encoding="utf-8")
+
+        self.assertNotIn('RESEARCH_REQ="$(dirname "$PROJECT_ROOT")/research/requirements.txt"', content)
+        self.assertNotIn('-r "$RESEARCH_REQ"', content)
+        self.assertIn("live 交易脚本不默认安装完整 research 依赖", content)
+
 
 if __name__ == "__main__":
     unittest.main()
