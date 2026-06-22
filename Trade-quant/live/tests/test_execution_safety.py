@@ -184,6 +184,69 @@ class ExecutionSafetyTests(unittest.TestCase):
         self.assertTrue(FakeSMTP.sent_message["Message-ID"])
         self.assertIn("@quant.system", FakeSMTP.sent_message["Message-ID"])
 
+    def test_daily_email_body_uses_fixed_operational_template(self):
+        trader = load_trader_module()
+
+        class Position:
+            symbol = "AAPL"
+            qty = "10"
+            market_value = "2500.50"
+            avg_entry_price = "200.0"
+            unrealized_pl = "500.5"
+
+        body = trader.build_daily_email_body({
+            "run_id": "run-1",
+            "mode": "Paper",
+            "dry_run": False,
+            "signal_date": "2026-06-22",
+            "equity": 100000.0,
+            "buying_power": 400000.0,
+            "high_watermark": 102000.0,
+            "drawdown": -0.0196,
+            "regime": "牛市",
+            "qqq_close": 737.74,
+            "qqq_ma50": 695.74,
+            "candidates": pd.Series({"IONQ": 2.3456, "COIN": 1.8765}),
+            "latest_prices": {"IONQ": 44.12, "COIN": 310.55},
+            "target_syms": ["IONQ", "COIN"],
+            "positions": [Position()],
+            "order_plan": [{
+                "action": "BUY",
+                "symbol": "IONQ",
+                "qty": 100,
+                "time_in_force": "opg",
+                "status": "planned",
+                "message": "reference_price=44.1200",
+            }],
+            "fills_recorded": 1,
+            "stop_orders_submitted": 1,
+            "kill_switch": False,
+            "attachments": ["paper_runs.csv", "signals.csv"],
+            "log_tail": "最近日志内容",
+        })
+
+        expected_sections = [
+            "账户概览",
+            "市场状态",
+            "今日候选股",
+            "目标持仓",
+            "当前持仓",
+            "操作记录",
+            "成交/滑点",
+            "风控状态",
+            "附件说明",
+        ]
+        self.assertEqual(expected_sections, [line[3:] for line in body.splitlines() if line.startswith("## ")][:9])
+        self.assertIn("账户净值: $100,000.00", body)
+        self.assertIn("可用资金: $400,000.00", body)
+        self.assertIn("QQQ=737.74", body)
+        self.assertIn("IONQ  score=2.3456  close=44.12", body)
+        self.assertIn("AAPL qty=10 market_value=$2,500.50", body)
+        self.assertIn("BUY IONQ qty=100 tif=opg status=planned", body)
+        self.assertIn("fills_recorded: 1", body)
+        self.assertIn("stop_orders_submitted: 1", body)
+        self.assertIn("paper_runs.csv, signals.csv", body)
+
 
 if __name__ == "__main__":
     unittest.main()

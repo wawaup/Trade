@@ -350,6 +350,104 @@ def ensure_stop_orders_for_positions(client: TradingClient, positions: list, sig
     return submitted
 
 
+def _money(value) -> str:
+    try:
+        return f"${float(value):,.2f}"
+    except (TypeError, ValueError):
+        return "$0.00"
+
+
+def _position_line(p) -> str:
+    symbol = getattr(p, "symbol", "")
+    qty = getattr(p, "qty", "")
+    market_value = _money(getattr(p, "market_value", 0))
+    avg_entry_price = _money(getattr(p, "avg_entry_price", 0))
+    unrealized_pl = _money(getattr(p, "unrealized_pl", 0))
+    return (
+        f"- {symbol} qty={qty} market_value={market_value} "
+        f"avg_entry={avg_entry_price} unrealized_pl={unrealized_pl}"
+    )
+
+
+def _candidate_lines(candidates: pd.Series, latest_prices: dict, limit: int = 10) -> list:
+    if candidates is None or candidates.empty:
+        return ["- 今日无候选股"]
+    lines = []
+    for symbol, score in candidates.sort_values(ascending=False).head(limit).items():
+        price = latest_prices.get(symbol, "")
+        price_text = f"{float(price):.2f}" if price != "" else "N/A"
+        lines.append(f"- {symbol}  score={float(score):.4f}  close={price_text}")
+    return lines
+
+
+def _order_plan_lines(order_plan: list) -> list:
+    if not order_plan:
+        return ["- 无新增操作计划"]
+    lines = []
+    for row in order_plan:
+        action = row.get("action", "")
+        symbol = row.get("symbol", "")
+        qty = row.get("qty", "")
+        tif = row.get("time_in_force", "")
+        status = row.get("status", "")
+        message = row.get("message", "")
+        lines.append(f"- {action} {symbol} qty={qty} tif={tif} status={status} {message}".rstrip())
+    return lines
+
+
+def build_daily_email_body(context: dict) -> str:
+    attachments = context.get("attachments", [])
+    positions = context.get("positions", [])
+    qqq_close = context.get("qqq_close")
+    qqq_ma50 = context.get("qqq_ma50")
+    qqq_text = "QQQ 数据暂缺"
+    if qqq_close is not None and qqq_ma50 is not None:
+        qqq_text = f"QQQ={float(qqq_close):.2f}  MA50={float(qqq_ma50):.2f}"
+
+    lines = [
+        "## 账户概览",
+        f"- run_id: {context.get('run_id', '')}",
+        f"- mode: {context.get('mode', '')}",
+        f"- dry_run: {context.get('dry_run', '')}",
+        f"- signal_date: {context.get('signal_date', '')}",
+        f"- 账户净值: {_money(context.get('equity', 0))}",
+        f"- 可用资金: {_money(context.get('buying_power', 0))}",
+        f"- 高水位: {_money(context.get('high_watermark', 0))}",
+        f"- 当前回撤: {float(context.get('drawdown', 0)):.2%}",
+        "",
+        "## 市场状态",
+        f"- QQQ 状态: {context.get('regime', '')}",
+        f"- {qqq_text}",
+        "",
+        "## 今日候选股",
+        *_candidate_lines(context.get("candidates", pd.Series(dtype=float)), context.get("latest_prices", {})),
+        "",
+        "## 目标持仓",
+        f"- {context.get('target_syms', [])}",
+        "",
+        "## 当前持仓",
+        *( [_position_line(p) for p in positions] if positions else ["- 当前无持仓"] ),
+        "",
+        "## 操作记录",
+        *_order_plan_lines(context.get("order_plan", [])),
+        "",
+        "## 成交/滑点",
+        f"- fills_recorded: {context.get('fills_recorded', 0)}",
+        "- 滑点统计: 暂未自动计算，详见 fills.csv 与 signals.csv",
+        "",
+        "## 风控状态",
+        f"- kill_switch: {context.get('kill_switch', False)}",
+        f"- stop_orders_submitted: {context.get('stop_orders_submitted', 0)}",
+        "",
+        "## 附件说明",
+        f"- {', '.join(attachments) if attachments else '无附件'}",
+        "",
+        "## 最近日志",
+        context.get("log_tail", ""),
+    ]
+    return "\n".join(lines)
+
+
 # ── 市场数据拉取 ───────────────────────────────────────────────────────────────
 def _normalize_ohlcv(
     close: pd.DataFrame,
@@ -636,6 +734,7 @@ def rebalance(
     signal_date: str,
     run_id:      str,
     audit:       Optional[AuditWriter] = None,
+    order_plan:  Optional[list] = None,
 ) -> int:
     """
     对比 Alpaca 当前持仓与目标 Top-N，生成并提交差异订单。
@@ -661,7 +760,7 @@ def rebalance(
     for sym in to_exit:
         log.info(f"  SELL  {sym:8s}（全仓平仓）")
         if audit:
-            audit.append_order({
+            row = {
                 "run_id": run_id,
                 "signal_date": signal_date,
                 "action": "SELL_CLOSE",
@@ -672,7 +771,10 @@ def rebalance(
                 "client_order_id": "",
                 "status": "dry_run" if dry_run else "planned",
                 "message": "不在目标持仓",
-            })
+            }
+            audit.append_order(row)
+            if order_plan is not None:
+                order_plan.append(row)
         if not dry_run:
             try:
                 client.close_position(sym)
@@ -694,7 +796,7 @@ def rebalance(
         log.info(f"  BUY   {sym:8s} × {qty:4d} @ ~${price:8.2f}  (≈${val_each:,.0f})")
         order_req = build_market_order(sym, qty, OrderSide.BUY, signal_date, "enter")
         if audit:
-            audit.append_order({
+            row = {
                 "run_id": run_id,
                 "signal_date": signal_date,
                 "action": "BUY",
@@ -705,7 +807,10 @@ def rebalance(
                 "client_order_id": order_req.client_order_id,
                 "status": "dry_run" if dry_run else "planned",
                 "message": f"reference_price={price:.4f}",
-            })
+            }
+            audit.append_order(row)
+            if order_plan is not None:
+                order_plan.append(row)
         if not dry_run:
             try:
                 order = client.submit_order(order_req)
@@ -768,8 +873,9 @@ def main():
             status = "api_connection_failed"
             raise
         equity  = float(account.equity)
+        buying_power = float(account.buying_power)
         log.info(f"账户净值: ${equity:>12,.2f}  "
-                 f"可用资金: ${float(account.buying_power):>12,.2f}")
+                 f"可用资金: ${buying_power:>12,.2f}")
 
     # ── Kill Switch 检查 ─────────────────────────────────────────────────────
         hw = float(state["high_watermark"]) if state["high_watermark"] else equity
@@ -826,16 +932,19 @@ def main():
             status = "duplicate_signal_skipped"
             return
         existing_positions = client.get_all_positions()
-        ensure_stop_orders_for_positions(client, existing_positions, signal_date, args.dry_run)
+        stop_orders_submitted = ensure_stop_orders_for_positions(client, existing_positions, signal_date, args.dry_run)
         fills_recorded = record_recent_fills(client, audit, run_id, signal_date)
         target_syms, regime_str, candidates = compute_today_signals(close, high, low, vol)
         latest_prices = close.iloc[-1].to_dict()
         audit.append_signal_rows(run_id, signal_date, candidates, latest_prices)
+        qqq_close = float(close["QQQ"].iloc[-1]) if "QQQ" in close.columns else None
+        qqq_ma50 = float(close["QQQ"].rolling(50).mean().iloc[-1]) if "QQQ" in close.columns else None
 
         # ── 执行调仓 ─────────────────────────────────────────────────────────────
         log.info(f"\n目标持仓 ({regime_str}, Top-{len(target_syms)}): {target_syms}")
+        order_plan = []
         try:
-            n = rebalance(client, target_syms, close, equity, args.dry_run, signal_date, run_id, audit)
+            n = rebalance(client, target_syms, close, equity, args.dry_run, signal_date, run_id, audit, order_plan)
         except Exception:
             status = "order_submit_failed"
             raise
@@ -847,21 +956,29 @@ def main():
         _save_state(state)
         status = "ok"
 
-        email_lines = [
-            f"run_id: {run_id}",
-            f"mode: {'Paper' if PAPER else 'LIVE'}",
-            f"dry_run: {args.dry_run}",
-            f"signal_date: {signal_date}",
-            f"regime: {regime_str}",
-            f"target_syms: {target_syms}",
-            f"orders_submitted: {n}",
-            f"fills_recorded: {fills_recorded}",
-            f"equity: {equity:.2f}",
-            f"drawdown: {dd:.2%}",
-            "",
-            "最近日志:",
-            _read_log_tail(80),
-        ]
+        email_lines = [build_daily_email_body({
+            "run_id": run_id,
+            "mode": "Paper" if PAPER else "LIVE",
+            "dry_run": args.dry_run,
+            "signal_date": signal_date,
+            "equity": equity,
+            "buying_power": buying_power,
+            "high_watermark": hw,
+            "drawdown": dd,
+            "regime": regime_str,
+            "qqq_close": qqq_close,
+            "qqq_ma50": qqq_ma50,
+            "candidates": candidates,
+            "latest_prices": latest_prices,
+            "target_syms": target_syms,
+            "positions": existing_positions,
+            "order_plan": order_plan,
+            "fills_recorded": fills_recorded,
+            "stop_orders_submitted": stop_orders_submitted,
+            "kill_switch": state.get("kill_switch", False),
+            "attachments": [p.name for p in _audit_attachments()],
+            "log_tail": _read_log_tail(80),
+        })]
         log.info(f"\n本次执行完成，提交 {n} 笔订单")
         log.info("=" * 64)
     except Exception:
