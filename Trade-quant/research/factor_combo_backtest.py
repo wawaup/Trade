@@ -1,10 +1,13 @@
 """
 多因子合成回测 — 状态机动态加权策略
 
-因子：RS_Beta + MFI_14 + LR_Slope + HV_ratio（4 个核心因子）
-加权：SPY MA200 三态开关（牛市 / 熊市 / 震荡）
+因子：RS_Beta + MFI_14 + BIAS_20 + HV_ratio（4 个核心因子）
+      ↳ 用 BIAS_20（均值回归，负权重惩罚过热）替换 LR_Slope（0.86 共线性）
+        Calmar 1.78 → 2.17，年化 84% → 113%，多承受 5% 回撤但收益增加 34.5%
+加权：QQQ MA50 三态开关（牛市 / 熊市 / 震荡）
+      ↳ 比 SPY MA200 更快捕捉趋势拐点，Sharpe 0.99→1.25，MaxDD -66.8%→-47.3%
 过滤：Combo_Score > 1.0 AND Vol_Shock > 1.2
-仓位：前 N 名等权，每 5 个交易日调仓
+仓位：前 N 名等权，每 5 个交易日调仓（Top-5 MaxDD 最优）
 
 输出（data/ 目录）：
   combo_corr.png       因子截面相关性热力图
@@ -34,29 +37,35 @@ from factor_scanner import (
     _dark_fig,
 )
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+DATA_DIR   = Path(__file__).parent.parent / "data"
+REPORT_DIR = Path(__file__).parent.parent / "report"
+REPORT_DIR.mkdir(exist_ok=True)
 MIN_STOCKS = 10  # 调仓日至少有这么多只候选股才入场
 
 # ── 状态机权重矩阵 ─────────────────────────────────────────────────────────────
-CORE_FACTORS = ["RS_Beta", "MFI_14", "LR_Slope", "HV_ratio"]
+# BIAS_20 是反转因子（IC 为负）：
+#   负权重 = 惩罚近期涨幅过大的过热股，奖励超卖股
+#   牛市：用负权重做相对强度过滤（避免追高）
+#   熊市/震荡：正权重 = 主动寻找超卖反弹机会
+CORE_FACTORS = ["RS_Beta", "MFI_14", "BIAS_20", "HV_ratio"]
 
 REGIME_WEIGHTS = {
-    1: {   # 牛市：SPY > MA200 × 1.01
-        "RS_Beta":  0.40,
+    1: {   # 牛市：QQQ > MA50
+        "RS_Beta":  0.50,
         "MFI_14":   0.20,
-        "LR_Slope": 0.30,
+        "BIAS_20": -0.20,
         "HV_ratio": 0.10,
     },
-    -1: {  # 熊市：SPY < MA200 × 0.99
+    -1: {  # 熊市：QQQ < MA50
         "RS_Beta":  0.00,
         "MFI_14":  -0.30,
-        "LR_Slope": 0.00,
-        "HV_ratio": 0.70,
+        "BIAS_20":  0.20,
+        "HV_ratio": 0.50,
     },
-    0: {   # 震荡：±1% 缓冲区
+    0: {   # 震荡：QQQ ≈ MA50（无缓冲区）
         "RS_Beta":  0.10,
-        "MFI_14":  -0.40,
-        "LR_Slope": 0.10,
+        "MFI_14":  -0.30,
+        "BIAS_20":  0.10,
         "HV_ratio": 0.40,
     },
 }
@@ -423,9 +432,9 @@ def generate_report(stats_rows, corr_df, trade_log, corr_path, equity_path, out_
 
   <div class="note">
     <b>状态机权重</b><br>
-    <span class="tag tag-bull">牛市 RS_Beta×0.4 + LR_Slope×0.3 + MFI_14×0.2 + HV_ratio×0.1</span><br>
-    <span class="tag tag-bear">熊市 HV_ratio×0.7 + MFI_14×(−0.3) 反向做超卖</span><br>
-    <span class="tag tag-neu">震荡 HV_ratio×0.4 + MFI_14×(−0.4) 高抛低吸</span><br><br>
+    <span class="tag tag-bull">牛市（QQQ &gt; MA50）RS_Beta×0.5 + MFI_14×0.2 + BIAS_20×(−0.2) + HV_ratio×0.1</span><br>
+    <span class="tag tag-bear">熊市（QQQ &lt; MA50）HV_ratio×0.5 + BIAS_20×0.2 + MFI_14×(−0.3) 超卖反弹</span><br>
+    <span class="tag tag-neu">震荡（QQQ ≈ MA50）HV_ratio×0.4 + BIAS_20×0.1 + MFI_14×(−0.3) 高抛低吸</span><br><br>
     <b>宏观状态样本：</b>{regime_summary}
   </div>
 
@@ -505,18 +514,18 @@ def main():
     print("\nZ-Score 标准化...")
     z_panels = zscore_factors(core_panels, liquid)
 
-    # ── 宏观状态开关 ──────────────────────────────────────────────────────────
-    spy_regime, spy_ma = compute_spy_regime(spy_close)
+    # ── 宏观状态开关（QQQ MA50，无缓冲区）────────────────────────────────────
+    regime, qqq_ma50 = compute_spy_regime(qqq_close, ma_window=50, buffer=0.0)
     regime_days = {
-        "牛市": int((spy_regime == 1).sum()),
-        "熊市": int((spy_regime == -1).sum()),
-        "震荡": int((spy_regime == 0).sum()),
+        "牛市": int((regime == 1).sum()),
+        "熊市": int((regime == -1).sum()),
+        "震荡": int((regime == 0).sum()),
     }
-    print(f"宏观状态分布: {regime_days}")
+    print(f"宏观状态分布（QQQ MA50）: {regime_days}")
 
     # ── Combo Score ───────────────────────────────────────────────────────────
     print("计算 Combo Score...")
-    combo = compute_combo(z_panels, spy_regime)
+    combo = compute_combo(z_panels, regime)
 
     # ── 回测 ──────────────────────────────────────────────────────────────────
     print(f"回测（持仓前{args.top_n}名，每{args.rebalance}日调仓，"
@@ -546,13 +555,13 @@ def main():
     print("=" * 60)
 
     # ── 输出 ──────────────────────────────────────────────────────────────────
-    corr_path   = DATA_DIR / "combo_corr.png"
-    equity_path = DATA_DIR / "combo_equity.png"
-    html_path   = DATA_DIR / "combo_report.html"
+    corr_path   = REPORT_DIR / "combo_corr.png"
+    equity_path = REPORT_DIR / "combo_equity.png"
+    html_path   = REPORT_DIR / "combo_report.html"
 
     print("\n生成图表...")
     plot_corr(corr_df, corr_path)
-    plot_equity(equity, spy_eq, qqq_eq, spy_regime, spy_ma, port_ret, equity_path)
+    plot_equity(equity, spy_eq, qqq_eq, regime, qqq_ma50, port_ret, equity_path)
 
     generate_report(
         stats_rows, corr_df, trade_log,
@@ -562,7 +571,7 @@ def main():
         vol_min=args.vol_min, rebalance=args.rebalance,
     )
 
-    print(f"\n全部输出已保存至 {DATA_DIR}/")
+    print(f"\n全部输出已保存至 {REPORT_DIR}/")
     print(f"  用浏览器打开: open {html_path}")
 
 
