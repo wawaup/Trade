@@ -100,6 +100,23 @@ MANUAL_SUPPLEMENT = [
 # ── 基准（仅用于 RS 因子，不纳入测试池）──────────────────────────────────────
 BENCHMARKS = ["SPY", "QQQ", "XLK"]
 
+# 已确认退市/私有化/并购旧代码；保留注释用于研究留档，但不进入可交易股票池。
+EXCLUDED_SYMBOLS = {
+    "ADYEN",
+    "ALTR",
+    "ANSS",
+    "CFLT",
+    "COUP",
+    "DLOCAL",
+    "EXAS",
+    "IIVI",
+    "LILM",
+    "NKLA",
+    "PSTG",
+    "SMAR",
+    "VERV",
+}
+
 
 def try_fetch_arkk(timeout: int = 10) -> list[str]:
     """尝试从 ARK 官网抓取 ARKK 最新成分股列表。"""
@@ -147,7 +164,7 @@ def build_universe() -> dict:
         added = 0
         for sym in symbols:
             sym = sym.upper().strip()
-            if sym and sym not in seen and sym not in BENCHMARKS:
+            if sym and sym not in seen and sym not in BENCHMARKS and sym not in EXCLUDED_SYMBOLS:
                 seen.add(sym)
                 all_symbols.append(sym)
                 added += 1

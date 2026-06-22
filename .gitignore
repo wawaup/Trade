@@ -5,3 +5,10 @@ data/
 .env
 __pycache__/
 *.pyc
+
+# Live trading runtime artifacts; regenerated per machine.
+Trade-quant/live/.env
+Trade-quant/live/trader.log
+Trade-quant/live/state.json
+Trade-quant/live/audit/
+Trade-quant/live/venv/

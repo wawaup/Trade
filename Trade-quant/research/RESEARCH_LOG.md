@@ -541,6 +541,101 @@ ADX>25 过滤不仅没有改善风险，**所有指标全面恶化**，是本研
 
 ---
 
+## 第十一阶段：Paper/Live 实盘部署蓝图对照
+
+### 阶段一：交易日历与执行时机
+
+当前 live 脚本采用 **方案 B：盘后计算，次日开盘/常规盘执行**。
+
+实现现状：
+- `deploy/cron_setup.sh` 默认注册 `21:35 UTC`，对应美东盘后运行（标准时约 16:35，夏令时约 17:35）。
+- `alpaca_trader.py` 拉取最新完整日线，使用上一交易日已经确认的 `close/high/low/volume` 计算 Combo_Score。
+- 信号计算后默认提交 `MarketOrderRequest + TimeInForce.OPG`，采用盘后算信号、次日开盘集合竞价执行的语义。
+- 回测引擎本身使用 `prev = dates[i - 1]` 的信号，在 `date` 当天开始持仓收益，因此逻辑上更接近“收盘后形成信号，下一交易日建仓”，而不是“当天尾盘抢跑”。
+
+为什么暂不采用 15:55 尾盘抢跑：
+- 当前因子依赖完整日线收盘价与全天成交量，15:55 时 `close` 和 `volume` 都未最终定稿。
+- `Vol_Shock` 对成交量敏感，尾盘未完成 K 线可能导致候选股集合变化。
+- 尾盘抢跑虽然更贴近“收盘价成交”，但会把研究假设从“完整日线信号”改成“未完成日线信号”，需要重新回测验证。
+
+必须注意的实盘落差：
+- 次日高开/低开会带来隔夜 gap，实盘成交价可能偏离信号日收盘价。
+- 当前回测没有单独建模“信号日收盘价 -> 次日开盘成交价”的 gap 成本，只通过摩擦成本粗略覆盖滑点。
+- Paper 阶段必须记录 `信号日收盘价`、`次日开盘价`、`实际成交价`，用真实数据验证 0.25% 摩擦成本是否足够。
+
+后续建议：
+- 增加跳空保护：若新买入标的次日开盘相对信号日收盘高开超过阈值（例如 3%-5%），可选择跳过或降低仓位；该规则必须先回测验证。
+- 增加 open-to-close / open-to-open 版本回测，直接评估次日开盘成交假设，而不是继续只看 close-to-close。
+
+### 阶段二：实盘适配器（Live Execution Script）
+
+已实现：
+- `live/alpaca_trader.py` 已作为 Paper/Live 执行脚本存在。
+- 数据源已切换为 Alpaca Historical Bars API（默认 `MARKET_DATA_SOURCE=alpaca`，`ALPACA_DATA_FEED=iex`），不再把 yfinance 作为 live 主数据源。
+- 已复用研究模块的 `load_universe()`、`compute_factors()`、`zscore_factors()`、`CORE_FACTORS`、`REGIME_WEIGHTS`。
+- 已实现 QQQ MA50 状态机、Combo_Score、Vol_Shock 双过滤和 Top-5 目标持仓生成。
+- 已调用 `TradingClient.get_all_positions()` 获取当前真实/Paper 持仓。
+- 已实现差异调仓：不在目标列表的持仓平仓；目标列表中已持有的标的保持不动；目标列表中新标的按等权金额买入。
+- 已实现 `TimeInForce.OPG` 默认开盘执行、live 模式 `LIVE_CONFIRM=YES` 二次确认、同一 signal_date 幂等保护。
+- 已实现数据完整性门槛：QQQ/SPY 必须存在、有效股票数必须达到 `MIN_VALID_SYMBOLS`、最新行情日期不能在未来。
+- 已实现 `paper_runs.csv`、`signals.csv`、`orders.csv`、`fills.csv` 审计落盘。
+
+部分实现/待补强：
+- 当前新增买入使用整数股 `int(val_each / price)`，未支持 fractional shares（碎股）和现金残差优化。
+- 当前“目标列表中已持有的标的”保持不动，未实现回到 20% 权重的再平衡。
+- 当前缺少“新买入跳空保护”和“最大单票权重/最大订单金额”二级风控。
+- 当前成交回报已落盘，但尚未自动计算滑点统计日报。
+
+### 阶段三：Paper Trading 孵化期
+
+已实现：
+- `deploy/cron_setup.sh` 和 `deploy/run_trader.sh` 已提供 GCP VM 定时运行基础。
+- `alpaca_verify.py` 可验证账户连接和市场数据 API。
+- `alpaca_trader.py --dry-run --force` 可用于首次预演，不提交订单。
+- `trader.log` 与 `state.json` 已用于运行日志和高水位/调仓状态持久化。
+- 已实现邮件日报/告警：普通日报、API 连接失败、行情异常、数据校验失败、下单失败、熔断、配置缺失、脚本异常、服务失效均有区分标题。
+- 已新增 `service_watchdog.py` 独立检查最近一次运行时间，避免主脚本未启动时无人报警。
+
+未实现/必须补齐：
+- 没有信号一致性校验：Paper 当天 Top-5 与离线回测脚本同一日 Top-5 是否一致，目前需要人工比对。
+- 没有滑点日报：尚未自动统计 Alpaca 成交价 vs 信号日收盘价 vs 次日开盘价。
+
+Paper 阶段每日检查清单：
+- 脚本是否成功运行，是否有网络超时/API 限频/数据不足。
+- 今日 live 目标 Top-5 是否与同一数据口径的研究脚本结果一致。
+- 实际成交价相对信号日收盘价、次日开盘价的偏离是否落在 0.25% 摩擦成本假设内。
+- 是否出现跳空过大但仍被买入的案例，记录后决定是否加入跳空保护。
+
+### 阶段四：Go Live 与风控熔断
+
+已实现：
+- 通过 `ALPACA_PAPER=true/false` 可切换 Paper/Live API。
+- 已实现账户级高水位 `high_watermark` 和 `KILL_DD=-30%` 熔断。
+- 触发熔断时会 `cancel_orders()`、`close_all_positions(cancel_orders=True)`，并将 `state.json` 的 `kill_switch` 置为 `true`。
+- 后续运行若 `kill_switch=true`，脚本会拒绝继续执行，直到人工手动解除。
+- 已实现熔断触发/锁定邮件告警。
+- 已实现个股级 GTC Stop Order：对已有持仓按 `STOP_LOSS_PCT=0.25` 挂保护性止损。
+- 已实现 live 模式二次确认保护：`ALPACA_PAPER=false` 时必须设置 `LIVE_CONFIRM=YES`。
+- 已实现订单幂等保护：同一 signal_date 默认不重复提交真实订单。
+
+未实现/必须补齐：
+- 止损单生命周期管理仍需补强：调仓卖出后撤销对应 stop；持仓继续保留时更新 stop；新增 OPG 买单成交后在下一次运行创建 stop。
+- 未实现交易日历校验：节假日、半日市、非交易日目前只靠 cron 周一到周五和数据可用性间接处理。
+
+### 当前结论
+
+可以进入 Paper Trading 的前置条件已基本具备：Alpaca 账户连接、Alpaca 日线数据、信号计算、差异调仓、GCP cron 基础、账户级 kill switch 均已落地。
+
+Paper 30 天测试已具备启动条件；正式 Go Live 前仍建议补齐：
+1. 信号一致性自动校验；
+2. 滑点日报；
+3. 跳空保护回测与实盘规则；
+4. stop order 生命周期管理；
+5. 交易日历/半日市校验；
+6. 外部 uptime 监控（覆盖整台 GCP VM 宕机、本机无法发邮件的场景）。
+
+---
+
 ## 待研究事项
 
 - [x] ~~解决 RS_Beta / LR_Slope 0.856 相关性问题~~ → 已用 BIAS_20 替换
@@ -553,3 +648,10 @@ ADX>25 过滤不仅没有改善风险，**所有指标全面恶化**，是本研
 - [x] ~~Hold-out OOS 在 BIAS_20 体系下重新确认~~ → IS（2022-2024）Sharpe 1.44 / OOS（2025-2026）Sharpe 1.16；OOS MaxDD −52.2%；IS/OOS 比值 0.81，在可接受范围内
 - [x] ~~Top-N 在 BIAS_20 体系下重新扫描~~ → 所有持仓数（3/5/7/10/15）Sharpe 完全一致（1.36），持仓数对风险调整收益无影响；维持 Top-5（MaxDD 最优）
 - [x] ~~运行 `factor_combo_optimize.py`（第三轮，含 Exp-G）~~ → Exp-G 全面失败（Sharpe 0.82，MaxDD −60.4%），**ADX 过滤放弃**，最终策略维持 Exp-A（详见第十阶段）
+- [x] Paper 执行模式升级为 `TimeInForce.OPG`，并验证 Alpaca 接受开盘集合竞价订单
+- [x] 增加 Paper 运行落盘：信号快照、目标持仓、订单、成交
+- [x] 增加数据完整性门槛：最新 bar 日期、QQQ/SPY 必须存在、有效股票数下限
+- [x] 增加异常/熔断告警：邮件日报、紧急报警、服务失效 watcher
+- [x] 增加个股级 GTC stop order 基础保护
+- [x] 增加 live 模式二次确认和订单幂等保护
+- [ ] 增加滑点日报、信号一致性自动校验、stop order 生命周期管理、交易日历校验
