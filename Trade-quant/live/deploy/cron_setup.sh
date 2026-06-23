@@ -62,14 +62,28 @@ touch "$LOG_DIR/trader.log"
 # ---------- 5. 注册 Cron Job ----------
 echo "[5/5] 注册 Cron Job（主策略 + 股票池监控 + 服务健康检查）..."
 
+# ⚠️  时区前置要求：所有 Cron 时间均以美东时间（ET）表达，与夏/冬令时无关。
+#      首次部署前必须执行：sudo timedatectl set-timezone America/New_York
+#      验证：timedatectl | grep "Time zone"  # 应显示 America/New_York
+CURRENT_TZ=$(timedatectl show --property=Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo "unknown")
+if [ "$CURRENT_TZ" != "America/New_York" ]; then
+    echo ""
+    echo "  ⚠️  当前服务器时区为 '$CURRENT_TZ'，建议改为 America/New_York："
+    echo "      sudo timedatectl set-timezone America/New_York"
+    echo "  （不改时区会导致夏令时切换时 LULD 重试任务在盘前错误触发）"
+    echo "  继续部署（使用当前时区）..."
+    echo ""
+fi
+
 RUNNER="$PROJECT_ROOT/deploy/run_trader.sh"
 chmod +x "$RUNNER"
 
-CRON_CMD="35 21 * * 1-5 VENV_PYTHON=$PYTHON_BIN $RUNNER >> $LOG_DIR/trader.log 2>&1"
-# LULD 熔断重试：9:45 AM ET = 13:45 UTC（夏令时），OPG 订单被拒后约 15 分钟启动重试循环
-HALT_RETRY_CMD="45 13 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN alpaca_trader.py --retry-halted >> $LOG_DIR/trader.log 2>&1"
-UNIVERSE_CMD="05 21 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN universe_monitor.py >> $LOG_DIR/universe_monitor.log 2>&1"
-WATCHDOG_CMD="20 22 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN service_watchdog.py >> $LOG_DIR/watchdog.log 2>&1"
+# 所有时间均为美东时间（ET），需服务器时区 = America/New_York
+UNIVERSE_CMD="10 16 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN universe_monitor.py >> $LOG_DIR/universe_monitor.log 2>&1"
+CRON_CMD="35 16 * * 1-5 VENV_PYTHON=$PYTHON_BIN $RUNNER >> $LOG_DIR/trader.log 2>&1"
+# LULD 熔断重试：9:45 AM ET，OPG 被拒后约 15 分钟，重试循环直到 12:00 ET
+HALT_RETRY_CMD="45 09 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN alpaca_trader.py --retry-halted >> $LOG_DIR/trader.log 2>&1"
+WATCHDOG_CMD="20 17 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN service_watchdog.py >> $LOG_DIR/watchdog.log 2>&1"
 CRON_BEGIN="# TRADE_QUANT_CRON_BEGIN"
 CRON_END="# TRADE_QUANT_CRON_END"
 

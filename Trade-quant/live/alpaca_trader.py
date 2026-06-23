@@ -96,7 +96,7 @@ EMAIL_FROM     = os.getenv("EMAIL_FROM", EMAIL_USERNAME)
 EMAIL_TO       = os.getenv("EMAIL_TO", "")
 
 EARNINGS_BLACKOUT_DAYS    = int(os.getenv("EARNINGS_BLACKOUT_DAYS", "2"))
-KILL_SWITCH_LIMIT_SLIPPAGE = float(os.getenv("KILL_SWITCH_LIMIT_SLIPPAGE", "0.02"))
+KILL_SWITCH_LIMIT_SLIPPAGE = float(os.getenv("KILL_SWITCH_LIMIT_SLIPPAGE", "0.03"))
 HALT_RETRY_UNTIL_HOUR_ET  = int(os.getenv("HALT_RETRY_UNTIL_HOUR_ET", "12"))
 
 # 已确认不可再直接从行情源获取的旧代码。IIVI 已并入/更名为 COHR，池子中已保留 COHR。
@@ -381,7 +381,10 @@ def _is_after_hours() -> bool:
 
 
 def get_upcoming_earnings(symbols: list[str], days_ahead: int = 2) -> set[str]:
-    """返回在未来 days_ahead 个交易日内发布财报的股票集合（财报避雷针）。"""
+    """返回在未来 days_ahead 个交易日内发布财报的股票集合（财报避雷针）。
+    yfinance 不同版本的 ticker.calendar 返回值结构不一：dict / DataFrame / None。
+    任何解析错误均静默跳过，原则：宁可错过一次避雷，不能因 API 异常挂断发单主流程。
+    """
     if days_ahead <= 0:
         return set()
     blackout: set[str] = set()
@@ -390,19 +393,36 @@ def get_upcoming_earnings(symbols: list[str], days_ahead: int = 2) -> set[str]:
     for sym in [s for s in symbols if s not in ("QQQ", "SPY")]:
         try:
             cal = yf.Ticker(sym).calendar
-            if not cal:
+            if cal is None:
                 continue
-            dates = cal.get("Earnings Date", [])
-            if not isinstance(dates, (list, pd.Series)):
-                dates = [dates]
-            for ed in dates:
-                ed_ts = pd.Timestamp(ed).normalize()
+
+            # yfinance ≥0.2 返回 dict；部分旧版或特殊股票返回 DataFrame
+            if isinstance(cal, dict):
+                raw_dates = cal.get("Earnings Date", [])
+            elif hasattr(cal, "columns"):           # DataFrame
+                col = next((c for c in cal.columns if "Earnings" in str(c) and "Date" in str(c)), None)
+                raw_dates = cal[col].dropna().tolist() if col else []
+            else:
+                continue
+
+            if not isinstance(raw_dates, (list, pd.Series)):
+                raw_dates = [raw_dates]
+
+            for ed in raw_dates:
+                if ed is None:
+                    continue
+                try:
+                    ed_ts = pd.Timestamp(ed).normalize()
+                except Exception:
+                    continue
+                if pd.isna(ed_ts):
+                    continue
                 if today <= ed_ts <= cutoff:
                     blackout.add(sym)
                     log.info(f"  📅 财报避雷：{sym} 预计 {ed_ts.date()} 发布财报（{days_ahead}日内），强制回避")
                     break
         except Exception as e:
-            log.warning(f"  {sym} 财报日历查询失败（跳过）: {e}")
+            log.warning(f"  {sym} 财报日历查询失败（跳过，默认放行）: {e}")
     return blackout
 
 
