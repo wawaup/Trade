@@ -104,6 +104,18 @@ class FetchPanelTests(unittest.TestCase):
         self.assertEqual(low["DELL"].count(), 180)
         self.assertEqual(vol["DELL"].count(), 180)
 
+    def test_alpaca_feed_supports_only_iex_or_sip_and_defaults_to_sip(self):
+        trader = load_trader_module()
+
+        with patch.object(trader, "ALPACA_FEED", "sip"):
+            self.assertEqual(trader._alpaca_feed(), trader.DataFeed.SIP)
+
+        with patch.object(trader, "ALPACA_FEED", "iex"):
+            self.assertEqual(trader._alpaca_feed(), trader.DataFeed.IEX)
+
+        with patch.object(trader, "ALPACA_FEED", "delayed_sip"):
+            self.assertEqual(trader._alpaca_feed(), trader.DataFeed.SIP)
+
 
 class UniverseTests(unittest.TestCase):
     def test_build_universe_excludes_known_delisted_symbols(self):

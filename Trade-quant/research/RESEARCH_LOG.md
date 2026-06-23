@@ -571,7 +571,7 @@ ADX>25 过滤不仅没有改善风险，**所有指标全面恶化**，是本研
 
 已实现：
 - `live/alpaca_trader.py` 已作为 Paper/Live 执行脚本存在。
-- 数据源已切换为 Alpaca Historical Bars API（默认 `MARKET_DATA_SOURCE=alpaca`，`ALPACA_DATA_FEED=iex`），不再把 yfinance 作为 live 主数据源。
+- 数据源已切换为 Alpaca Historical Bars API（默认 `MARKET_DATA_SOURCE=alpaca`，`ALPACA_DATA_FEED=sip`），不再把 yfinance 作为 live 主数据源；IEX 可用作备用，但成交量仅单交易所口径，不适合 Vol_Shock/流动性过滤的主口径。
 - 已复用研究模块的 `load_universe()`、`compute_factors()`、`zscore_factors()`、`CORE_FACTORS`、`REGIME_WEIGHTS`。
 - 已实现 QQQ MA50 状态机、Combo_Score、Vol_Shock 双过滤和 Top-5 目标持仓生成。
 - 已调用 `TradingClient.get_all_positions()` 获取当前真实/Paper 持仓。

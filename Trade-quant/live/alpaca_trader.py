@@ -77,7 +77,7 @@ KILL_DD        = -0.30  # Kill Switch 触发阈值（从账户高水位回撤 30
 DATA_DAYS      = 350    # 拉取天数（RS_Beta 需 ≥ 60 天 Beta 稳定期，留 350 天余量）
 MIN_DATA_ROWS  = 150    # 单票最少有效日线数量
 DATA_SOURCE    = os.getenv("MARKET_DATA_SOURCE", "alpaca").lower()
-ALPACA_FEED    = os.getenv("ALPACA_DATA_FEED", "iex").lower()
+ALPACA_FEED    = os.getenv("ALPACA_DATA_FEED", "sip").lower()
 DATA_BATCH_SIZE = 50
 MIN_VALID_SYMBOLS = int(os.getenv("MIN_VALID_SYMBOLS", "120"))
 ORDER_TIF      = os.getenv("ORDER_TIF", "opg").lower()
@@ -517,9 +517,8 @@ def _alpaca_feed() -> DataFeed:
     feeds = {
         "iex": DataFeed.IEX,
         "sip": DataFeed.SIP,
-        "delayed_sip": DataFeed.DELAYED_SIP,
     }
-    return feeds.get(ALPACA_FEED, DataFeed.IEX)
+    return feeds.get(ALPACA_FEED, DataFeed.SIP)
 
 
 def _fetch_alpaca_chunk(
