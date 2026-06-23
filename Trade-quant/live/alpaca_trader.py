@@ -24,12 +24,14 @@ import argparse
 import csv
 import smtplib
 import ssl
+import time
 import traceback
 import email.utils
 from pathlib import Path
 from datetime import date, datetime
 from email.message import EmailMessage
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -38,10 +40,10 @@ from dotenv import load_dotenv
 
 from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest, StopOrderRequest
+from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest, MarketOrderRequest, StopOrderRequest
 from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
 
 # ── 路径 & 模块导入 ────────────────────────────────────────────────────────────
@@ -49,9 +51,10 @@ LIVE_DIR     = Path(__file__).parent
 RESEARCH_DIR = LIVE_DIR.parent / "research"
 DATA_DIR     = LIVE_DIR.parent / "data"
 UNIVERSE_PATH = DATA_DIR / "universe.json"
-STATE_FILE   = LIVE_DIR / "state.json"
-LOG_FILE     = LIVE_DIR / "trader.log"
-AUDIT_DIR    = LIVE_DIR / "audit"
+STATE_FILE        = LIVE_DIR / "state.json"
+LOG_FILE          = LIVE_DIR / "trader.log"
+AUDIT_DIR         = LIVE_DIR / "audit"
+HALT_PENDING_FILE = LIVE_DIR / "halt_pending.json"
 
 sys.path.insert(0, str(RESEARCH_DIR))
 try:
@@ -91,6 +94,10 @@ EMAIL_USERNAME = os.getenv("EMAIL_USERNAME", "")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
 EMAIL_FROM     = os.getenv("EMAIL_FROM", EMAIL_USERNAME)
 EMAIL_TO       = os.getenv("EMAIL_TO", "")
+
+EARNINGS_BLACKOUT_DAYS    = int(os.getenv("EARNINGS_BLACKOUT_DAYS", "2"))
+KILL_SWITCH_LIMIT_SLIPPAGE = float(os.getenv("KILL_SWITCH_LIMIT_SLIPPAGE", "0.02"))
+HALT_RETRY_UNTIL_HOUR_ET  = int(os.getenv("HALT_RETRY_UNTIL_HOUR_ET", "12"))
 
 # 已确认不可再直接从行情源获取的旧代码。IIVI 已并入/更名为 COHR，池子中已保留 COHR。
 STALE_SYMBOLS = {"IIVI"}
@@ -361,6 +368,191 @@ def ensure_stop_orders_for_positions(client: TradingClient, positions: list, sig
         except Exception as e:
             log.warning(f"  {getattr(p, 'symbol', '?')} 止损单处理失败: {e}")
     return submitted
+
+
+def _now_hour_et() -> int:
+    return datetime.now(ZoneInfo("America/New_York")).hour
+
+
+def _is_after_hours() -> bool:
+    """当前是否处于盘后交易窗口（16:00–20:00 ET）。"""
+    h = _now_hour_et()
+    return 16 <= h < 20
+
+
+def get_upcoming_earnings(symbols: list[str], days_ahead: int = 2) -> set[str]:
+    """返回在未来 days_ahead 个交易日内发布财报的股票集合（财报避雷针）。"""
+    if days_ahead <= 0:
+        return set()
+    blackout: set[str] = set()
+    today = pd.Timestamp.today().normalize()
+    cutoff = today + pd.offsets.BDay(days_ahead)
+    for sym in [s for s in symbols if s not in ("QQQ", "SPY")]:
+        try:
+            cal = yf.Ticker(sym).calendar
+            if not cal:
+                continue
+            dates = cal.get("Earnings Date", [])
+            if not isinstance(dates, (list, pd.Series)):
+                dates = [dates]
+            for ed in dates:
+                ed_ts = pd.Timestamp(ed).normalize()
+                if today <= ed_ts <= cutoff:
+                    blackout.add(sym)
+                    log.info(f"  📅 财报避雷：{sym} 预计 {ed_ts.date()} 发布财报（{days_ahead}日内），强制回避")
+                    break
+        except Exception as e:
+            log.warning(f"  {sym} 财报日历查询失败（跳过）: {e}")
+    return blackout
+
+
+def _append_halt_pending(sym: str, qty: int, signal_date: str, run_id: str):
+    """将被 LULD 熔断拒绝的订单写入重试队列文件。"""
+    data: dict = {"pending_date": signal_date, "orders": []}
+    if HALT_PENDING_FILE.exists():
+        try:
+            data = json.loads(HALT_PENDING_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    if data.get("pending_date") != signal_date:
+        data = {"pending_date": signal_date, "orders": []}
+    if not any(o["symbol"] == sym for o in data["orders"]):
+        data["orders"].append({"symbol": sym, "qty": qty, "signal_date": signal_date, "run_id": run_id})
+    HALT_PENDING_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    log.warning(f"  已写入 halt_pending.json：{sym} × {qty}")
+
+
+def _kill_switch_liquidate(client: TradingClient, positions: list, dry_run: bool):
+    """Kill Switch 触发时的清仓逻辑：盘后优先用限价单，否则用市价单（次日 9:30 执行）。"""
+    log.critical("  取消所有挂单...")
+    if not dry_run:
+        try:
+            client.cancel_orders()
+        except Exception as e:
+            log.error(f"  cancel_orders 失败: {e}")
+
+    if _is_after_hours() and KILL_SWITCH_LIMIT_SLIPPAGE > 0:
+        log.critical(
+            f"  当前处于盘后（ET {_now_hour_et()}:xx），"
+            f"使用盘后限价单逃生（让价 -{KILL_SWITCH_LIMIT_SLIPPAGE:.0%}）"
+        )
+        submitted = 0
+        for p in positions:
+            sym = p.symbol
+            qty = int(float(getattr(p, "qty", 0) or 0))
+            if qty <= 0:
+                continue
+            ref = float(getattr(p, "current_price", 0) or 0)
+            if ref <= 0:
+                ref = float(getattr(p, "avg_entry_price", 0) or 0)
+            if ref <= 0:
+                log.warning(f"    {sym} 无参考价格，跳过（需手动平仓）")
+                continue
+            limit_price = round(ref * (1 - KILL_SWITCH_LIMIT_SLIPPAGE), 2)
+            req = LimitOrderRequest(
+                symbol=sym,
+                qty=qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                limit_price=limit_price,
+                extended_hours=True,
+                client_order_id=f"tq-ks-{sym.lower()}",
+            )
+            log.critical(f"    SELL {sym} × {qty} @ ${limit_price:.2f} [盘后限价]")
+            if not dry_run:
+                try:
+                    client.submit_order(req)
+                    submitted += 1
+                except Exception as e:
+                    log.error(f"    ❌ {sym} 盘后限价单失败，改为 close_position: {e}")
+                    try:
+                        client.close_position(sym)
+                    except Exception as e2:
+                        log.error(f"    ❌ {sym} close_position 也失败: {e2}")
+        log.critical(f"  Kill Switch 盘后限价单：已提交 {submitted}/{len(positions)} 笔")
+    else:
+        log.critical(
+            f"  当前非盘后时段（ET {_now_hour_et()}:xx），"
+            "提交市价清仓单（次日 9:30 集合竞价执行）"
+        )
+        if not dry_run:
+            try:
+                client.close_all_positions(cancel_orders=True)
+            except Exception as e:
+                log.error(f"  close_all_positions 失败: {e}")
+
+
+def retry_halted_orders(dry_run: bool):
+    """重试因 LULD 熔断被拒的买入单，每 5 分钟一次，直到 HALT_RETRY_UNTIL_HOUR_ET 时（ET）。"""
+    if not HALT_PENDING_FILE.exists():
+        log.info("未找到 halt_pending.json，无需重试，退出")
+        return
+    try:
+        data = json.loads(HALT_PENDING_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.error(f"读取 halt_pending.json 失败: {e}")
+        return
+    orders = data.get("orders", [])
+    if not orders:
+        log.info("重试队列为空，退出")
+        HALT_PENDING_FILE.unlink(missing_ok=True)
+        return
+
+    log.info(f"LULD 重试模式：发现 {len(orders)} 笔挂单 → {[o['symbol'] for o in orders]}")
+    client = TradingClient(API_KEY, SECRET_KEY, paper=PAPER)
+    data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
+
+    remaining = list(orders)
+    attempt = 0
+    while remaining:
+        et_hour = _now_hour_et()
+        if et_hour >= HALT_RETRY_UNTIL_HOUR_ET:
+            log.warning(f"  已到 {HALT_RETRY_UNTIL_HOUR_ET}:00 ET，放弃剩余 {len(remaining)} 笔重试")
+            break
+        attempt += 1
+        log.info(f"  第 {attempt} 次重试（{len(remaining)} 笔）...")
+        still_pending = []
+        for o in remaining:
+            sym = o["symbol"]
+            qty = o["qty"]
+            try:
+                quote_req = StockLatestQuoteRequest(symbol_or_symbols=[sym])
+                quotes = data_client.get_stock_latest_quote(quote_req)
+                bid = float(quotes[sym].bid_price) if sym in quotes else 0.0
+                if bid <= 0:
+                    log.warning(f"    {sym} 报价为 0，跳过本轮")
+                    still_pending.append(o)
+                    continue
+                limit_price = round(bid * 0.999, 2)  # bid - 0.1%，确保成交
+                limit_req = LimitOrderRequest(
+                    symbol=sym,
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,
+                    limit_price=limit_price,
+                    client_order_id=f"tq-retry-{sym.lower()}",
+                )
+                log.info(f"    RETRY BUY {sym} × {qty} @ ${limit_price:.2f}")
+                if not dry_run:
+                    client.submit_order(limit_req)
+                log.info(f"    ✅ {sym} 重试订单已提交")
+            except Exception as e:
+                err_msg = str(e).lower()
+                if any(kw in err_msg for kw in ("halt", "not_tradable", "suspended", "asset_not_tradable")):
+                    log.warning(f"    ⚠️ {sym} 仍停牌/熔断，5 分钟后继续重试")
+                    still_pending.append(o)
+                else:
+                    log.error(f"    ❌ {sym} 重试失败（非熔断原因）: {e}")
+        remaining = still_pending
+        if remaining:
+            log.info(f"  {len(remaining)} 笔仍在等待，5 分钟后重试...")
+            time.sleep(300)
+
+    if not remaining:
+        log.info("  所有挂单已成功处理，清除 halt_pending.json")
+        HALT_PENDING_FILE.unlink(missing_ok=True)
+    else:
+        log.warning(f"  {len(remaining)} 笔最终放弃（保留文件供复盘）：{[o['symbol'] for o in remaining]}")
 
 
 def _money(value) -> str:
@@ -767,8 +959,18 @@ def rebalance(
     n_orders    = 0
     val_each    = equity / len(target_syms)  # 等权仓位金额
 
-    # 1. 平掉不在目标列表的旧持仓
-    to_exit = [sym for sym in current_map if sym not in target_set]
+    # 财报避雷：未来 EARNINGS_BLACKOUT_DAYS 天内有财报的股票强制回避
+    if EARNINGS_BLACKOUT_DAYS > 0:
+        check_syms = list((target_set | set(current_map.keys())) - {"QQQ", "SPY"})
+        earnings_blackout = get_upcoming_earnings(check_syms, EARNINGS_BLACKOUT_DAYS)
+        if earnings_blackout:
+            log.warning(f"  📅 财报避雷命中：{sorted(earnings_blackout)} 移出买入计划并强制出场")
+            target_set -= earnings_blackout
+    else:
+        earnings_blackout: set[str] = set()
+
+    # 1. 平掉不在目标列表的旧持仓（含财报避雷强制出场）
+    to_exit = [sym for sym in current_map if sym not in target_set or sym in earnings_blackout]
     for sym in to_exit:
         log.info(f"  SELL  {sym:8s}（全仓平仓）")
         if audit:
@@ -829,7 +1031,12 @@ def rebalance(
                 log.info(f"    ✅ 订单 id={order.id}  status={order.status}")
                 n_orders += 1
             except Exception as e:
-                log.error(f"    ❌ 买入失败 {sym}: {e}")
+                err_msg = str(e).lower()
+                if any(kw in err_msg for kw in ("halt", "not_tradable", "suspended", "asset_not_tradable")):
+                    log.warning(f"    ⚠️ {sym} 停牌/LULD 熔断，写入重试队列")
+                    _append_halt_pending(sym, qty, signal_date, run_id)
+                else:
+                    log.error(f"    ❌ 买入失败 {sym}: {e}")
 
     if not to_exit and not to_enter:
         log.info("  持仓无需变动（目标与当前完全一致）")
@@ -848,7 +1055,13 @@ def main():
                         help="忽略 5 日间隔，强制立刻调仓")
     parser.add_argument("--allow-duplicate", action="store_true",
                         help="允许同一 signal_date 重复提交订单（默认禁止）")
+    parser.add_argument("--retry-halted", action="store_true",
+                        help="重试因 LULD 熔断被拒的挂单（由单独 cron 在 9:45 AM ET 触发）")
     args = parser.parse_args()
+
+    if args.retry_halted:
+        retry_halted_orders(dry_run=args.dry_run)
+        return
     run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     audit = AuditWriter(AUDIT_DIR)
     status = "started"
@@ -918,10 +1131,8 @@ def main():
 
         if dd <= KILL_DD:
             log.critical(f"🚨 Kill Switch 触发！账户从高水位回撤 {dd:.1%}（阈值 {KILL_DD:.0%}）")
-            if not args.dry_run:
-                log.critical("   取消所有挂单并清仓所有持仓...")
-                client.cancel_orders()
-                client.close_all_positions(cancel_orders=True)
+            ks_positions = client.get_all_positions()
+            _kill_switch_liquidate(client, ks_positions, args.dry_run)
             state["kill_switch"] = True
             _save_state(state)
             status = "kill_switch_triggered"
