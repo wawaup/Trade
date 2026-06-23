@@ -23,6 +23,16 @@ class DeployScriptTests(unittest.TestCase):
         self.assertNotIn('-r "$RESEARCH_REQ"', content)
         self.assertIn("live 交易脚本不默认安装完整 research 依赖", content)
 
+    def test_cron_setup_replaces_managed_cron_block(self):
+        content = CRON_SETUP.read_text(encoding="utf-8")
+
+        self.assertIn("TRADE_QUANT_CRON_BEGIN", content)
+        self.assertIn("TRADE_QUANT_CRON_END", content)
+        self.assertIn("awk", content)
+        self.assertIn('skip=1', content)
+        self.assertIn('skip=0', content)
+        self.assertNotIn('grep -v "run_trader.sh"', content)
+
     def test_live_requirements_include_research_runtime_imports(self):
         content = REQUIREMENTS.read_text(encoding="utf-8")
 

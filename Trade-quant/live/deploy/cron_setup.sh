@@ -67,12 +67,20 @@ chmod +x "$RUNNER"
 
 CRON_CMD="35 21 * * 1-5 VENV_PYTHON=$PYTHON_BIN $RUNNER >> $LOG_DIR/trader.log 2>&1"
 WATCHDOG_CMD="20 22 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN service_watchdog.py >> $LOG_DIR/watchdog.log 2>&1"
+CRON_BEGIN="# TRADE_QUANT_CRON_BEGIN"
+CRON_END="# TRADE_QUANT_CRON_END"
 
-# 去重：先移除旧条目，再添加
+# 先移除本脚本管理的旧定时任务区块，再添加最新区块；保留用户其它 crontab 内容。
 TMPFILE=$(mktemp)
-crontab -l 2>/dev/null | grep -v "run_trader.sh" | grep -v "service_watchdog.py" > "$TMPFILE" || true
+crontab -l 2>/dev/null | awk -v begin="$CRON_BEGIN" -v end="$CRON_END" '
+    $0 == begin { skip=1; next }
+    $0 == end { skip=0; next }
+    skip != 1 { print }
+' > "$TMPFILE" || true
+echo "$CRON_BEGIN" >> "$TMPFILE"
 echo "$CRON_CMD" >> "$TMPFILE"
 echo "$WATCHDOG_CMD" >> "$TMPFILE"
+echo "$CRON_END" >> "$TMPFILE"
 crontab "$TMPFILE"
 rm -f "$TMPFILE"
 
