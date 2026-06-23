@@ -99,6 +99,10 @@ EARNINGS_BLACKOUT_DAYS    = int(os.getenv("EARNINGS_BLACKOUT_DAYS", "2"))
 KILL_SWITCH_LIMIT_SLIPPAGE = float(os.getenv("KILL_SWITCH_LIMIT_SLIPPAGE", "0.03"))
 HALT_RETRY_UNTIL_HOUR_ET  = int(os.getenv("HALT_RETRY_UNTIL_HOUR_ET", "12"))
 
+# 仓位规模模拟：留空/0 = 用 Alpaca 账户真实净值计算仓位；
+# 设置后仅用此金额代替账户净值计算买入数量，账户净值/回撤/Kill Switch 判断仍基于真实账户（百分比口径不受影响）
+SIM_CAPITAL_USD = float(os.getenv("SIM_CAPITAL_USD", "0"))
+
 # 已确认不可再直接从行情源获取的旧代码。IIVI 已并入/更名为 COHR，池子中已保留 COHR。
 STALE_SYMBOLS = {"IIVI"}
 
@@ -950,15 +954,16 @@ def compute_today_signals(
 
 # ── 调仓执行 ──────────────────────────────────────────────────────────────────
 def rebalance(
-    client:      TradingClient,
-    target_syms: list,
-    close:       pd.DataFrame,
-    equity:      float,
-    dry_run:     bool,
-    signal_date: str,
-    run_id:      str,
-    audit:       Optional[AuditWriter] = None,
-    order_plan:  Optional[list] = None,
+    client:        TradingClient,
+    target_syms:   list,
+    close:         pd.DataFrame,
+    equity:        float,
+    dry_run:       bool,
+    signal_date:   str,
+    run_id:        str,
+    audit:         Optional[AuditWriter] = None,
+    order_plan:    Optional[list] = None,
+    earnings_allow: Optional[set] = None,
 ) -> int:
     """
     对比 Alpaca 当前持仓与目标 Top-N，生成并提交差异订单。
@@ -968,6 +973,9 @@ def rebalance(
       - 不在 Top-N 的仓位 → 全额平仓（市价）
       - Top-N 中新增的标的 → 按等权买入（equity / TOP_N / price）
       - Top-N 中已持有的标的 → 保持不动（不做权重再平衡）
+
+    earnings_allow：手动豁免名单（--earnings-allow），命中财报避雷的标的若在此名单中则不强制出场/不移出买入计划。
+    仅本次运行生效，需由人工确认财报预期正面后手动传入。
     """
     if not target_syms:
         log.warning("⚠️  目标持仓为空，跳过本次调仓，保持现有持仓不动")
@@ -977,17 +985,23 @@ def rebalance(
     current_map = {p.symbol: p for p in positions}
     target_set  = set(target_syms)
     n_orders    = 0
-    val_each    = equity / len(target_syms)  # 等权仓位金额
 
     # 财报避雷：未来 EARNINGS_BLACKOUT_DAYS 天内有财报的股票强制回避
     if EARNINGS_BLACKOUT_DAYS > 0:
         check_syms = list((target_set | set(current_map.keys())) - {"QQQ", "SPY"})
         earnings_blackout = get_upcoming_earnings(check_syms, EARNINGS_BLACKOUT_DAYS)
+        if earnings_allow:
+            overridden = earnings_blackout & earnings_allow
+            if overridden:
+                log.warning(f"  ⚠️ 手动豁免财报避雷：{sorted(overridden)}（人工确认不强制出场，风险自负）")
+                earnings_blackout -= earnings_allow
         if earnings_blackout:
             log.warning(f"  📅 财报避雷命中：{sorted(earnings_blackout)} 移出买入计划并强制出场")
             target_set -= earnings_blackout
     else:
         earnings_blackout: set[str] = set()
+
+    val_each = equity / len(target_set) if target_set else 0.0  # 等权仓位金额（财报避雷过滤后重新计算）
 
     # 1. 平掉不在目标列表的旧持仓（含财报避雷强制出场）
     to_exit = [sym for sym in current_map if sym not in target_set or sym in earnings_blackout]
@@ -1016,8 +1030,8 @@ def rebalance(
             except Exception as e:
                 log.error(f"    ❌ 平仓失败 {sym}: {e}")
 
-    # 2. 买入目标列表中尚未持有的标的
-    to_enter = [sym for sym in target_syms if sym not in current_map]
+    # 2. 买入目标列表中尚未持有的标的（财报避雷已从 target_set 中剔除）
+    to_enter = [sym for sym in target_syms if sym in target_set and sym not in current_map]
     for sym in to_enter:
         if sym not in close.columns:
             log.warning(f"  ⚠️  {sym} 无价格数据，跳过")
@@ -1077,7 +1091,11 @@ def main():
                         help="允许同一 signal_date 重复提交订单（默认禁止）")
     parser.add_argument("--retry-halted", action="store_true",
                         help="重试因 LULD 熔断被拒的挂单（由单独 cron 在 9:45 AM ET 触发）")
+    parser.add_argument("--earnings-allow", type=str, default="",
+                        help="逗号分隔股票代码，本次运行手动豁免财报避雷强制出场（如 MU,AAPL）。"
+                             "仅本次生效，需人工确认财报预期正面后使用，风险自负。")
     args = parser.parse_args()
+    earnings_allow = {s.strip().upper() for s in args.earnings_allow.split(",") if s.strip()}
 
     if args.retry_halted:
         retry_halted_orders(dry_run=args.dry_run)
@@ -1209,10 +1227,16 @@ def main():
         run_summary["stop_orders_submitted"] = str(stop_orders_submitted)
 
         # ── 执行调仓 ─────────────────────────────────────────────────────────────
+        sizing_capital = SIM_CAPITAL_USD if SIM_CAPITAL_USD > 0 else equity
+        if SIM_CAPITAL_USD > 0:
+            log.info(f"  💰 仓位规模模拟：按 ${SIM_CAPITAL_USD:,.0f} 计算买入数量（账户真实净值 ${equity:,.2f} 仅用于回撤/Kill Switch 判断）")
         log.info(f"\n目标持仓 ({regime_str}, Top-{len(target_syms)}): {target_syms}")
         order_plan = []
+        if earnings_allow:
+            log.info(f"  ⚠️ 本次手动豁免财报避雷名单：{sorted(earnings_allow)}")
         try:
-            n = rebalance(client, target_syms, close, equity, args.dry_run, signal_date, run_id, audit, order_plan)
+            n = rebalance(client, target_syms, close, sizing_capital, args.dry_run, signal_date, run_id, audit, order_plan,
+                           earnings_allow=earnings_allow)
         except Exception:
             status = "order_submit_failed"
             raise
