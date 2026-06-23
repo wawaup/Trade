@@ -47,6 +47,8 @@ from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
 # ── 路径 & 模块导入 ────────────────────────────────────────────────────────────
 LIVE_DIR     = Path(__file__).parent
 RESEARCH_DIR = LIVE_DIR.parent / "research"
+DATA_DIR     = LIVE_DIR.parent / "data"
+UNIVERSE_PATH = DATA_DIR / "universe.json"
 STATE_FILE   = LIVE_DIR / "state.json"
 LOG_FILE     = LIVE_DIR / "trader.log"
 AUDIT_DIR    = LIVE_DIR / "audit"
@@ -55,6 +57,7 @@ sys.path.insert(0, str(RESEARCH_DIR))
 try:
     from factor_scanner import load_universe, compute_factors, build_liquidity_mask
     from factor_combo_backtest import zscore_factors, CORE_FACTORS, REGIME_WEIGHTS
+    from build_universe import build_universe as build_universe_dict, save_universe as save_universe_dict
 except ImportError as e:
     print(f"❌ 导入 research 模块失败：{e}")
     print("   请在 Trade-quant/live/ 目录内运行本脚本")
@@ -173,6 +176,16 @@ def validate_panel(close: pd.DataFrame):
     today = date.today()
     if latest > today:
         raise RuntimeError(f"最新行情日期异常: {latest} > {today}")
+
+
+def load_trading_universe() -> tuple[list[str], list[str]]:
+    if not UNIVERSE_PATH.exists():
+        log.warning(f"未找到股票池文件，自动构建: {UNIVERSE_PATH}")
+        universe = build_universe_dict()
+        save_universe_dict(universe)
+    else:
+        universe = json.loads(UNIVERSE_PATH.read_text(encoding="utf-8"))
+    return universe["symbols"], universe["benchmarks"]
 
 
 class AuditWriter:
@@ -915,7 +928,7 @@ def main():
         log.info("→ 调仓日确认，拉取数据并计算信号...")
 
     # ── 数据拉取 & 信号计算 ──────────────────────────────────────────────────
-        symbols, _ = load_universe()
+        symbols, _ = load_trading_universe()
         try:
             close, high, low, vol = fetch_panel(symbols, DATA_DAYS)
         except Exception:

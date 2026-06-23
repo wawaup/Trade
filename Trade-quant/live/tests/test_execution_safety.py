@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -246,6 +247,45 @@ class ExecutionSafetyTests(unittest.TestCase):
         self.assertIn("fills_recorded: 1", body)
         self.assertIn("stop_orders_submitted: 1", body)
         self.assertIn("paper_runs.csv, signals.csv", body)
+
+    def test_load_trading_universe_builds_missing_universe_file(self):
+        trader = load_trader_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            universe_path = Path(tmp) / "universe.json"
+            built = {
+                "symbols": ["AAPL", "NVDA"],
+                "benchmarks": ["SPY", "QQQ"],
+            }
+
+            with (
+                patch.object(trader, "UNIVERSE_PATH", universe_path),
+                patch.object(trader, "build_universe_dict", return_value=built),
+                patch.object(trader, "save_universe_dict") as save_universe,
+            ):
+                symbols, benchmarks = trader.load_trading_universe()
+
+        self.assertEqual(symbols, ["AAPL", "NVDA"])
+        self.assertEqual(benchmarks, ["SPY", "QQQ"])
+        save_universe.assert_called_once_with(built)
+
+    def test_load_trading_universe_prefers_existing_universe_file(self):
+        trader = load_trader_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            universe_path = Path(tmp) / "universe.json"
+            universe_path.write_text(json.dumps({
+                "symbols": ["MSFT"],
+                "benchmarks": ["SPY", "QQQ"],
+            }), encoding="utf-8")
+
+            with (
+                patch.object(trader, "UNIVERSE_PATH", universe_path),
+                patch.object(trader, "build_universe_dict") as build_universe,
+            ):
+                symbols, benchmarks = trader.load_trading_universe()
+
+        self.assertEqual(symbols, ["MSFT"])
+        self.assertEqual(benchmarks, ["SPY", "QQQ"])
+        build_universe.assert_not_called()
 
 
 if __name__ == "__main__":
