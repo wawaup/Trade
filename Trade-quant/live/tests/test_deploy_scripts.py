@@ -33,6 +33,14 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn('skip=0', content)
         self.assertNotIn('grep -v "run_trader.sh"', content)
 
+    def test_cron_setup_registers_universe_monitor_and_review_api_hint(self):
+        content = CRON_SETUP.read_text(encoding="utf-8")
+
+        self.assertIn("UNIVERSE_CMD=", content)
+        self.assertIn("universe_monitor.py", content)
+        self.assertIn("universe_monitor.log", content)
+        self.assertIn("review_api.py --host 127.0.0.1 --port 8765", content)
+
     def test_live_requirements_include_research_runtime_imports(self):
         content = REQUIREMENTS.read_text(encoding="utf-8")
 

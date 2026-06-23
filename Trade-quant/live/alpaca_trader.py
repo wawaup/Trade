@@ -853,6 +853,20 @@ def main():
     audit = AuditWriter(AUDIT_DIR)
     status = "started"
     email_lines = []
+    run_summary = {
+        "signal_date": "",
+        "equity": "",
+        "buying_power": "",
+        "high_watermark": "",
+        "drawdown": "",
+        "regime": "",
+        "qqq_close": "",
+        "qqq_ma50": "",
+        "target_symbols": "",
+        "orders_submitted": "",
+        "fills_recorded": "",
+        "stop_orders_submitted": "",
+    }
 
     try:
         ensure_live_confirmation()
@@ -886,6 +900,8 @@ def main():
             raise
         equity  = float(account.equity)
         buying_power = float(account.buying_power)
+        run_summary["equity"] = f"{equity:.2f}"
+        run_summary["buying_power"] = f"{buying_power:.2f}"
         log.info(f"账户净值: ${equity:>12,.2f}  "
                  f"可用资金: ${buying_power:>12,.2f}")
 
@@ -896,6 +912,8 @@ def main():
         state["high_watermark"] = hw
 
         dd = (equity - hw) / hw
+        run_summary["high_watermark"] = f"{hw:.2f}"
+        run_summary["drawdown"] = f"{dd:.6f}"
         log.info(f"高水位: ${hw:>12,.2f}  当前回撤: {dd:.1%}")
 
         if dd <= KILL_DD:
@@ -939,6 +957,7 @@ def main():
             status = "data_validation_failed"
             raise
         signal_date = str(close.index[-1].date())
+        run_summary["signal_date"] = signal_date
         if is_duplicate_signal(state, signal_date, args.dry_run, args.allow_duplicate or ALLOW_DUPLICATE_SIGNAL):
             log.warning(f"⚠️  signal_date={signal_date} 已提交过订单，跳过以避免重复下单")
             status = "duplicate_signal_skipped"
@@ -951,6 +970,12 @@ def main():
         audit.append_signal_rows(run_id, signal_date, candidates, latest_prices)
         qqq_close = float(close["QQQ"].iloc[-1]) if "QQQ" in close.columns else None
         qqq_ma50 = float(close["QQQ"].rolling(50).mean().iloc[-1]) if "QQQ" in close.columns else None
+        run_summary["regime"] = regime_str
+        run_summary["qqq_close"] = f"{qqq_close:.4f}" if qqq_close is not None else ""
+        run_summary["qqq_ma50"] = f"{qqq_ma50:.4f}" if qqq_ma50 is not None else ""
+        run_summary["target_symbols"] = ",".join(target_syms)
+        run_summary["fills_recorded"] = str(fills_recorded)
+        run_summary["stop_orders_submitted"] = str(stop_orders_submitted)
 
         # ── 执行调仓 ─────────────────────────────────────────────────────────────
         log.info(f"\n目标持仓 ({regime_str}, Top-{len(target_syms)}): {target_syms}")
@@ -960,6 +985,7 @@ def main():
         except Exception:
             status = "order_submit_failed"
             raise
+        run_summary["orders_submitted"] = str(n)
 
     # ── 更新状态 ─────────────────────────────────────────────────────────────
         if not args.dry_run:
@@ -1007,6 +1033,7 @@ def main():
             "status": status,
             "mode": "Paper" if PAPER else "LIVE",
             "dry_run": args.dry_run,
+            **run_summary,
         })
         try:
             send_email(

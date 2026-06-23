@@ -73,6 +73,8 @@ class ExecutionSafetyTests(unittest.TestCase):
                 "run_id": "run-1",
                 "signal_date": "2026-06-22",
                 "status": "ok",
+                "equity": "100000.00",
+                "target_symbols": "AAPL",
             })
             audit.append_signal_rows("run-1", "2026-06-22", pd.Series({"AAPL": 1.23}), {"AAPL": 200.0})
             audit.append_order({
@@ -83,6 +85,7 @@ class ExecutionSafetyTests(unittest.TestCase):
             })
 
             self.assertIn("run-1", (Path(tmp) / "paper_runs.csv").read_text())
+            self.assertIn("100000.00", (Path(tmp) / "paper_runs.csv").read_text())
             self.assertIn("AAPL", (Path(tmp) / "signals.csv").read_text())
             self.assertIn("BUY", (Path(tmp) / "orders.csv").read_text())
 

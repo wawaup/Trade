@@ -118,8 +118,8 @@ EXCLUDED_SYMBOLS = {
 }
 
 
-def try_fetch_arkk(timeout: int = 10) -> list[str]:
-    """尝试从 ARK 官网抓取 ARKK 最新成分股列表。"""
+def fetch_arkk_with_status(timeout: int = 10) -> tuple[list[str], str]:
+    """尝试从 ARK 官网抓取 ARKK 最新成分股列表，并返回来源状态。"""
     url = (
         "https://ark-funds.com/wp-content/uploads/funds-etf-csv/"
         "ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv"
@@ -136,17 +136,23 @@ def try_fetch_arkk(timeout: int = 10) -> list[str]:
                     symbols.append(ticker)
         symbols = list(dict.fromkeys(symbols))  # 保序去重
         print(f"  在线抓取 ARKK: {len(symbols)} 只  ✓")
-        return symbols
+        return symbols, "online"
     except Exception as e:
         print(f"  在线抓取 ARKK 失败 ({e})，使用内置备用列表")
-        return ARKK_FALLBACK
+        return ARKK_FALLBACK, "fallback"
+
+
+def try_fetch_arkk(timeout: int = 10) -> list[str]:
+    """尝试从 ARK 官网抓取 ARKK 最新成分股列表。"""
+    symbols, _ = fetch_arkk_with_status(timeout=timeout)
+    return symbols
 
 
 def build_universe() -> dict:
     """合并所有层，去重，返回 universe 字典。"""
     print("构建股票池...")
 
-    arkk_symbols = try_fetch_arkk()
+    arkk_symbols, arkk_status = fetch_arkk_with_status()
 
     layers = {
         "XSD":       XSD_COMPONENTS,
@@ -180,6 +186,7 @@ def build_universe() -> dict:
         "symbols":    all_symbols,
         "benchmarks": BENCHMARKS,
         "layer_counts": layer_counts,
+        "source_status": {"ARKK_ARKW": arkk_status},
     }
     print(f"\n最终池子规模: {len(all_symbols)} 只 + {len(BENCHMARKS)} 个基准")
     return universe
