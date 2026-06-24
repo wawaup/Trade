@@ -121,6 +121,36 @@ class ExecutionSafetyTests(unittest.TestCase):
         self.assertEqual(client.orders[0].time_in_force, trader.TimeInForce.GTC)
         self.assertEqual(client.orders[0].stop_price, 75.0)
 
+    def test_rebalance_raises_when_broker_rejects_buy_order(self):
+        trader = load_trader_module()
+        idx = pd.bdate_range("2026-06-01", periods=3)
+        close = pd.DataFrame({"AMAT": [580.0, 582.0, 585.71]}, index=idx)
+
+        class Client:
+            def get_all_positions(self):
+                return []
+
+            def submit_order(self, req):
+                raise RuntimeError('{"code":40310000,"message":"opg orders must be submitted after 7:00pm and before 9:28am"}')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = trader.AuditWriter(Path(tmp))
+            with (
+                patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0),
+                self.assertRaisesRegex(RuntimeError, "opg orders"),
+            ):
+                trader.rebalance(
+                    Client(),
+                    ["AMAT"],
+                    close,
+                    5000.0,
+                    dry_run=False,
+                    signal_date="2026-06-23",
+                    run_id="run-opg-reject",
+                    audit=audit,
+                    order_plan=[],
+                )
+
     def test_email_subject_separates_daily_report_and_emergency_alerts(self):
         trader = load_trader_module()
 

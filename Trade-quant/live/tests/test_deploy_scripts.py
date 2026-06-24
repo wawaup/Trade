@@ -41,6 +41,20 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn("universe_monitor.log", content)
         self.assertIn("review_api.py --host 127.0.0.1 --port 8765", content)
 
+    def test_main_trader_cron_runs_inside_alpaca_opg_submission_window(self):
+        content = CRON_SETUP.read_text(encoding="utf-8")
+
+        self.assertIn('echo "CRON_TZ=America/New_York"', content)
+        self.assertIn('echo "TZ=America/New_York"', content)
+        self.assertIn('CRON_CMD="05 19 * * 1-5', content)
+        self.assertIn("TZ=America/New_York VENV_PYTHON=$PYTHON_BIN", content)
+        self.assertIn("OPG 开盘单提交窗口", content)
+
+    def test_watchdog_runs_after_main_trader_cron(self):
+        content = CRON_SETUP.read_text(encoding="utf-8")
+
+        self.assertIn('WATCHDOG_CMD="20 20 * * 1-5', content)
+
     def test_live_requirements_include_research_runtime_imports(self):
         content = REQUIREMENTS.read_text(encoding="utf-8")
 

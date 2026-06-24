@@ -78,12 +78,13 @@ fi
 RUNNER="$PROJECT_ROOT/deploy/run_trader.sh"
 chmod +x "$RUNNER"
 
-# 所有时间均为美东时间（ET），需服务器时区 = America/New_York
+# 所有时间均为美东时间（ET）。CRON_TZ 控制 cron 触发时间，TZ 传入脚本运行环境。
 UNIVERSE_CMD="10 16 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN universe_monitor.py >> $LOG_DIR/universe_monitor.log 2>&1"
-CRON_CMD="35 16 * * 1-5 VENV_PYTHON=$PYTHON_BIN $RUNNER >> $LOG_DIR/trader.log 2>&1"
+# OPG 开盘单提交窗口：19:00 ET ~ 次日 09:28 ET；盘后信号在 19:05 ET 提交次日开盘单。
+CRON_CMD="05 19 * * 1-5 TZ=America/New_York VENV_PYTHON=$PYTHON_BIN $RUNNER >> $LOG_DIR/trader.log 2>&1"
 # LULD 熔断重试：9:45 AM ET，OPG 被拒后约 15 分钟，重试循环直到 12:00 ET
 HALT_RETRY_CMD="45 09 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN alpaca_trader.py --retry-halted >> $LOG_DIR/trader.log 2>&1"
-WATCHDOG_CMD="20 17 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN service_watchdog.py >> $LOG_DIR/watchdog.log 2>&1"
+WATCHDOG_CMD="20 20 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN service_watchdog.py >> $LOG_DIR/watchdog.log 2>&1"
 CRON_BEGIN="# TRADE_QUANT_CRON_BEGIN"
 CRON_END="# TRADE_QUANT_CRON_END"
 
@@ -95,6 +96,8 @@ crontab -l 2>/dev/null | awk -v begin="$CRON_BEGIN" -v end="$CRON_END" '
     skip != 1 { print }
 ' > "$TMPFILE" || true
 echo "$CRON_BEGIN" >> "$TMPFILE"
+echo "CRON_TZ=America/New_York" >> "$TMPFILE"
+echo "TZ=America/New_York" >> "$TMPFILE"
 echo "$UNIVERSE_CMD" >> "$TMPFILE"
 echo "$CRON_CMD" >> "$TMPFILE"
 echo "$HALT_RETRY_CMD" >> "$TMPFILE"

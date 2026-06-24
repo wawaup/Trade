@@ -1071,6 +1071,7 @@ def rebalance(
                     _append_halt_pending(sym, qty, signal_date, run_id)
                 else:
                     log.error(f"    ❌ 买入失败 {sym}: {e}")
+                    raise
 
     if not to_exit and not to_enter:
         log.info("  持仓无需变动（目标与当前完全一致）")
