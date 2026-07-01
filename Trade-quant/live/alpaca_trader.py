@@ -154,7 +154,7 @@ def build_market_order(symbol: str, qty: int, side: OrderSide, signal_date: str,
 
 def build_stop_order(symbol: str, qty: int, reference_price: float, signal_date: str) -> StopOrderRequest:
     stop_price = round(reference_price * (1 - STOP_LOSS_PCT), 2)
-    client_order_id = f"tq-stop-{symbol.lower()}"
+    client_order_id = f"tq-stop-{symbol.lower()}-{_slug_date(signal_date)}"
     return StopOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -354,6 +354,19 @@ def record_recent_fills(client: TradingClient, audit: AuditWriter, run_id: str, 
 def ensure_stop_orders_for_positions(client: TradingClient, positions: list, signal_date: str, dry_run: bool) -> int:
     if not ENABLE_STOP_ORDERS:
         return 0
+
+    # 查询当前所有活跃挂单，找出已有的 GTC stop 单（按 tq-stop-{sym} 前缀匹配）
+    existing_stops: dict[str, object] = {}
+    try:
+        open_orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+        for o in open_orders:
+            cid = str(getattr(o, "client_order_id", "") or "")
+            sym_o = getattr(o, "symbol", "")
+            if cid.startswith(f"tq-stop-{sym_o.lower()}") and sym_o:
+                existing_stops[sym_o] = o
+    except Exception as e:
+        log.warning(f"  查询活跃挂单失败，跳过止损单去重检查: {e}")
+
     submitted = 0
     for p in positions:
         try:
@@ -364,6 +377,22 @@ def ensure_stop_orders_for_positions(client: TradingClient, positions: list, sig
             ref_price = float(getattr(p, "avg_entry_price", 0) or 0)
             if ref_price <= 0:
                 continue
+            desired_stop = round(ref_price * (1 - STOP_LOSS_PCT), 2)
+
+            existing = existing_stops.get(sym)
+            if existing is not None:
+                existing_price = float(getattr(existing, "stop_price", 0) or 0)
+                if abs(existing_price - desired_stop) < 0.01:
+                    log.info(f"  STOP  {sym:8s} 已有止损单 @ ${existing_price:.2f}，跳过")
+                    continue
+                # 止损价已变，撤旧单再补新单
+                log.info(f"  STOP  {sym:8s} 止损价更新 ${existing_price:.2f} → ${desired_stop:.2f}，撤旧补新")
+                if not dry_run:
+                    try:
+                        client.cancel_order_by_id(existing.id)
+                    except Exception as ce:
+                        log.warning(f"    撤销旧止损单失败 {sym}: {ce}")
+
             stop_req = build_stop_order(sym, qty, ref_price, signal_date)
             log.info(f"  STOP  {sym:8s} × {qty:4d} @ ${stop_req.stop_price:.2f}（已有持仓保护）")
             if not dry_run:
