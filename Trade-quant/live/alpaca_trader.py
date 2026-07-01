@@ -134,11 +134,12 @@ def _slug_date(value: str) -> str:
 
 
 def _order_time_in_force() -> TimeInForce:
+    # OPG 仅在美东 7:00pm–9:28am 窗口有效；盘后运行请用 DAY
     mapping = {
         "opg": TimeInForce.OPG,
         "day": TimeInForce.DAY,
     }
-    return mapping.get(ORDER_TIF, TimeInForce.OPG)
+    return mapping.get(ORDER_TIF, TimeInForce.DAY)
 
 
 def build_market_order(symbol: str, qty: int, side: OrderSide, signal_date: str, action: str) -> MarketOrderRequest:
