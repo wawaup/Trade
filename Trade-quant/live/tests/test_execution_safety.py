@@ -167,6 +167,61 @@ class ExecutionSafetyTests(unittest.TestCase):
                     order_plan=[],
                 )
 
+    def test_rebalance_cancels_existing_stop_orders_before_selling(self):
+        """回归用例：legacy rebalance()（--phase both 手动路径）在提交清仓/减仓卖单前
+        也必须先撤销该标的已有的 GTC 止损单，否则会因 qty_available 被占满而被拒
+        （HIGH-1 的同根因问题，此前只修了 execute_sell_phase，遗漏了 legacy 路径）。"""
+        trader = load_trader_module()
+        idx = pd.bdate_range("2026-06-01", periods=3)
+        close = pd.DataFrame({
+            "AMAT": [580.0, 582.0, 585.71],
+            "NVDA": [48.0, 49.0, 50.0],
+        }, index=idx)
+
+        class Position:
+            symbol = "AMAT"
+            qty = "10"
+            market_value = "5800"
+            avg_entry_price = "500"
+
+        class StopOrder:
+            id = "stop-amat-1"
+            client_order_id = "tq-stop-amat"
+            symbol = "AMAT"
+
+        class Client:
+            def __init__(self):
+                self.cancelled = []
+                self.submitted = []
+
+            def get_all_positions(self):
+                return [Position()]
+
+            def get_orders(self, req):
+                return [StopOrder()]
+
+            def cancel_order_by_id(self, order_id):
+                self.cancelled.append(order_id)
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "order-1", "status": "accepted"})()
+
+        client = Client()
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = trader.AuditWriter(Path(tmp))
+            with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
+                trader.rebalance(
+                    client, ["NVDA"], close, 5000.0, 5000.0,
+                    dry_run=False, signal_date="2026-06-23",
+                    run_id="run-stop-cancel", audit=audit, order_plan=[],
+                )
+
+        self.assertEqual(client.cancelled, ["stop-amat-1"])
+        sell_orders = [o for o in client.submitted if o.symbol == "AMAT"]
+        self.assertEqual(len(sell_orders), 1)
+        self.assertEqual(sell_orders[0].side, trader.OrderSide.SELL)
+
     def test_email_subject_separates_daily_report_and_emergency_alerts(self):
         trader = load_trader_module()
 
@@ -501,9 +556,55 @@ class ExecutionSafetyTests(unittest.TestCase):
         self.assertNotIn(trader.PENDING_SELL_KEY, state)
         self.assertIn(trader.CYCLE_PLAN_KEY, state)
         retry_plan = state[trader.CYCLE_PLAN_KEY]
-        self.assertEqual(retry_plan["close_all"], [{"symbol": "AMAT", "qty": 2.0}])
+        self.assertEqual(retry_plan["close_all"], [{"symbol": "AMAT", "qty": 2}])
+        self.assertIsInstance(retry_plan["close_all"][0]["qty"], int)
         self.assertEqual(retry_plan["trim"], [])
         self.assertEqual([b["symbol"] for b in retry_plan["buy"]], ["AMAT"])
+        self.assertFalse(retry_plan["buy"][0]["is_new"])
+
+    def test_sell_phase_retry_plan_uses_fresh_client_order_id_not_original(self):
+        """回归用例：写回的重试 cycle_plan 再次进入 sell 阶段时，必须生成与原始
+        卖单不同的 client_order_id，否则会被券商当作重复提交而实际从未真正下单，
+        导致重试永远空转、周期死锁（HIGH-1 的具体触发路径）。"""
+        trader = load_trader_module()
+
+        original_cid = "tq-20260622-close-amat"
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return {}
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def submit_order(self, req):
+                if req.client_order_id == original_cid:
+                    raise RuntimeError("client order id already exists")
+                self.submitted.append(req)
+                return type("Order", (), {"id": "sell-retry-1", "status": "accepted"})()
+
+        # 模拟 execute_buy_phase 写回的重试计划：signal_date 沿用原始信号日，
+        # plan_date 是重试当天（与原始 plan_date/signal_date 不同）
+        retry_plan = {
+            "plan_date": "2026-06-24",
+            "signal_date": "2026-06-22",
+            "close_all": [{"symbol": "AMAT", "qty": 2}],
+            "trim": [],
+            "buy": [],
+        }
+        state = {trader.CYCLE_PLAN_KEY: retry_plan}
+
+        client = Client()
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient):
+            summary = trader.execute_sell_phase(client, state, "run-sell-retry", dry_run=False)
+
+        self.assertEqual(len(client.submitted), 1)
+        self.assertNotEqual(client.submitted[0].client_order_id, original_cid)
+        self.assertFalse(summary["all_failed"])
 
     def test_buy_phase_skips_symbols_with_unconfirmed_sell_fills(self):
         trader = load_trader_module()

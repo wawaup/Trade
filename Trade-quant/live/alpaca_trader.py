@@ -1362,11 +1362,14 @@ def execute_sell_phase(client: TradingClient, state: dict, run_id: str, dry_run:
 
         if bid <= 0:
             log.warning(f"  ⚠️ {sym} 买一价异常（{bid}），改用市价单兜底")
-            order_req = build_market_order(sym, qty, OrderSide.SELL, plan["signal_date"], kind)
+            # client_order_id 用 plan_date（而非 signal_date）生成：重试计划的 plan_date
+            # 会是重新写入当天的日期，与首次尝试的 plan_date 不同，避免同一 signal_date
+            # 反复重试时 client_order_id 撞车、被券商当作重复提交而实际未真正下单。
+            order_req = build_market_order(sym, qty, OrderSide.SELL, plan["plan_date"], kind)
             limit_txt = "market"
         else:
             limit_price = round(bid, 2)
-            client_order_id = f"tq-{_slug_date(plan['signal_date'])}-{kind}-{sym.lower()}"
+            client_order_id = f"tq-{_slug_date(plan['plan_date'])}-{kind}-{sym.lower()}"
             order_req = LimitOrderRequest(
                 symbol=sym, qty=qty, side=OrderSide.SELL,
                 time_in_force=TimeInForce.DAY, limit_price=limit_price,
@@ -1444,7 +1447,7 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
             filled_qty = float(getattr(order, "filled_qty", 0) or 0)
             status_val = getattr(getattr(order, "status", ""), "value", str(getattr(order, "status", "")))
             if filled_qty < o["qty"]:
-                remaining = o["qty"] - filled_qty
+                remaining = int(o["qty"] - filled_qty)  # 整数股数，避免下游订单带小数 qty
                 issue = f"{o['symbol']} 卖单未完全成交（filled={filled_qty}/{o['qty']}, status={status_val}）"
                 log.warning(f"  ⚠️ {issue}")
                 summary["fill_issues"].append(issue)
@@ -1542,7 +1545,10 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
             # 再下一轮 buy 阶段重新核实并买入——避免这些标的被静默跳过、账户目标仓位永久跑偏。
             retry_close = [{"symbol": s["symbol"], "qty": s["qty"]} for s in unresolved_sells if s["kind"] == "close"]
             retry_trim  = [{"symbol": s["symbol"], "qty": s["qty"]} for s in unresolved_sells if s["kind"] != "close"]
-            retry_buy   = [b for b in pending.get("buy_carry", []) if b["symbol"] in bad_symbols]
+            # 卖出未完全成交说明仓位仍部分存在，对应买入决策不再是"新建"而是"加仓"
+            retry_buy = [
+                {**b, "is_new": False} for b in pending.get("buy_carry", []) if b["symbol"] in bad_symbols
+            ]
             retry_plan = {
                 "plan_date": str(today),
                 "signal_date": pending["signal_date"],
@@ -1689,6 +1695,10 @@ def rebalance(
             )
 
     # ── 1. SELL 阶段：清仓 + trim ────────────────────────────────────────────────
+    if not dry_run:
+        cancel_stop_orders_for_symbols(
+            client, [sym for sym, _ in close_all_list] + [sym for sym, *_ in trim_list]
+        )
     for sym, mv in close_all_list:
         # 取实际持仓 qty；close_position() 不支持 TIF，改用 MarketOrderRequest 确保 DAY 生效
         cur_qty = int(float(getattr(current_map[sym], "qty", 0) or 0)) if sym in current_map else 0
