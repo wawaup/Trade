@@ -27,7 +27,7 @@ import ssl
 import time
 import traceback
 import email.utils
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
@@ -90,6 +90,10 @@ ALLOW_DUPLICATE_SIGNAL = os.getenv("ALLOW_DUPLICATE_SIGNAL", "false").lower() ==
 ENABLE_STOP_ORDERS = os.getenv("ENABLE_STOP_ORDERS", "true").lower() == "true"
 STOP_LOSS_PCT  = float(os.getenv("STOP_LOSS_PCT", "0.25"))
 PRICE_SANITY_PCT = float(os.getenv("PRICE_SANITY_PCT", "0.5"))  # 最新价相对前一交易日收盘价的最大允许偏离
+
+# client_order_id 重复提交时，不同版本 Alpaca 报错文案不完全一致，统一在此维护关键字列表，
+# 避免各下单路径各自维护一份、后续遗漏更新。
+IDEMPOTENT_DUPLICATE_KEYWORDS = ("already exists", "duplicate", "must be unique")
 EMAIL_ENABLED  = os.getenv("EMAIL_ENABLED", "false").lower() == "true"
 EMAIL_SMTP_HOST = os.getenv("EMAIL_SMTP_HOST", "")
 EMAIL_SMTP_PORT = int(os.getenv("EMAIL_SMTP_PORT", "587"))
@@ -449,6 +453,31 @@ def record_recent_fills(client: TradingClient, audit: AuditWriter, run_id: str, 
     return n
 
 
+def cancel_stop_orders_for_symbols(client: TradingClient, symbols: list) -> int:
+    """卖出前必须先撤销这些标的已有的 GTC 止损单，否则其持有的 qty 会占满
+    qty_available，导致卖单被券商拒绝（'insufficient qty available'）。"""
+    if not symbols or not ENABLE_STOP_ORDERS:
+        return 0
+    wanted = {s.lower() for s in symbols}
+    cancelled = 0
+    try:
+        open_orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+    except Exception as e:
+        log.warning(f"  查询活跃挂单失败，无法撤销止损单（卖单可能因 qty 被占用而失败）: {e}")
+        return 0
+    for o in open_orders:
+        cid = str(getattr(o, "client_order_id", "") or "")
+        sym_o = getattr(o, "symbol", "")
+        if sym_o.lower() in wanted and cid.startswith(f"tq-stop-{sym_o.lower()}"):
+            try:
+                client.cancel_order_by_id(o.id)
+                cancelled += 1
+                log.info(f"  STOP  {sym_o:8s} 卖出前撤销已有止损单 {cid}")
+            except Exception as e:
+                log.warning(f"  {sym_o} 撤销止损单失败（卖单可能因 qty 被占用而失败）: {e}")
+    return cancelled
+
+
 def ensure_stop_orders_for_positions(client: TradingClient, positions: list, signal_date: str, dry_run: bool) -> int:
     if not ENABLE_STOP_ORDERS:
         return 0
@@ -536,47 +565,61 @@ def get_upcoming_earnings(symbols: list[str], days_ahead: int = 2) -> tuple[set[
     failed = 0
     # 注意：不用 `with ThreadPoolExecutor(...) as pool` —— yf 的网络调用一旦发起无法从
     # 外部中断，若用 with 语句，退出时会阻塞等待所有（含已超时的慢）线程跑完，超时保护形同虚设。
-    # 这里改为 shutdown(wait=False)：主流程按超时及时返回，慢线程留给后台自行跑完后回收。
+    # 这里改为 shutdown(wait=False)：本函数按全局截止时间及时返回，慢线程留给后台线程池自行
+    # 跑完后回收；注意这只是让*本函数*不阻塞——Python 退出时 concurrent.futures 仍会通过
+    # atexit 钩子等待所有工作线程结束，真正兜底进程不被挂起的是 run_trader.sh 的 `timeout 600`。
     pool = ThreadPoolExecutor(max_workers=8)
+    futures = {}
     try:
         futures = {pool.submit(_fetch_earnings_calendar, sym): sym for sym in check_syms}
-        for fut, sym in futures.items():
-            try:
-                cal = fut.result(timeout=EARNINGS_LOOKUP_TIMEOUT_SEC)
-                if cal is None:
-                    continue
-
-                # yfinance ≥0.2 返回 dict；部分旧版或特殊股票返回 DataFrame
-                if isinstance(cal, dict):
-                    raw_dates = cal.get("Earnings Date", [])
-                elif hasattr(cal, "columns"):           # DataFrame
-                    col = next((c for c in cal.columns if "Earnings" in str(c) and "Date" in str(c)), None)
-                    raw_dates = cal[col].dropna().tolist() if col else []
-                else:
-                    continue
-
-                if not isinstance(raw_dates, (list, pd.Series)):
-                    raw_dates = [raw_dates]
-
-                for ed in raw_dates:
-                    if ed is None:
+        pending = set(futures.keys())
+        try:
+            # 用 as_completed 设置一个"全局"截止时间，而不是对每个 future 依次等待
+            # EARNINGS_LOOKUP_TIMEOUT_SEC——后者在 future 数量超过 max_workers 时，
+            # 总等待时间会线性叠加（(N - max_workers) * timeout），完全背离超时保护的初衷。
+            for fut in as_completed(futures, timeout=EARNINGS_LOOKUP_TIMEOUT_SEC):
+                pending.discard(fut)
+                sym = futures[fut]
+                try:
+                    cal = fut.result()
+                    if cal is None:
                         continue
-                    try:
-                        ed_ts = pd.Timestamp(ed).normalize()
-                    except Exception:
+
+                    # yfinance ≥0.2 返回 dict；部分旧版或特殊股票返回 DataFrame
+                    if isinstance(cal, dict):
+                        raw_dates = cal.get("Earnings Date", [])
+                    elif hasattr(cal, "columns"):           # DataFrame
+                        col = next((c for c in cal.columns if "Earnings" in str(c) and "Date" in str(c)), None)
+                        raw_dates = cal[col].dropna().tolist() if col else []
+                    else:
                         continue
-                    if pd.isna(ed_ts):
-                        continue
-                    if today <= ed_ts <= cutoff:
-                        blackout.add(sym)
-                        log.info(f"  📅 财报避雷：{sym} 预计 {ed_ts.date()} 发布财报（{days_ahead}日内），强制回避")
-                        break
-            except FutureTimeoutError:
+
+                    if not isinstance(raw_dates, (list, pd.Series)):
+                        raw_dates = [raw_dates]
+
+                    for ed in raw_dates:
+                        if ed is None:
+                            continue
+                        try:
+                            ed_ts = pd.Timestamp(ed).normalize()
+                        except Exception:
+                            continue
+                        if pd.isna(ed_ts):
+                            continue
+                        if today <= ed_ts <= cutoff:
+                            blackout.add(sym)
+                            log.info(f"  📅 财报避雷：{sym} 预计 {ed_ts.date()} 发布财报（{days_ahead}日内），强制回避")
+                            break
+                except Exception as e:
+                    failed += 1
+                    log.warning(f"  {sym} 财报日历查询失败（跳过，默认放行）: {e}")
+        except FutureTimeoutError:
+            pass
+        finally:
+            for fut in pending:
+                sym = futures[fut]
                 failed += 1
-                log.warning(f"  {sym} 财报日历查询超时（>{EARNINGS_LOOKUP_TIMEOUT_SEC:.0f}s，跳过，默认放行）")
-            except Exception as e:
-                failed += 1
-                log.warning(f"  {sym} 财报日历查询失败（跳过，默认放行）: {e}")
+                log.warning(f"  {sym} 财报日历查询超时（全局 {EARNINGS_LOOKUP_TIMEOUT_SEC:.0f}s 截止未完成，跳过，默认放行）")
     finally:
         pool.shutdown(wait=False)
     degraded = bool(check_syms) and (failed / len(check_syms)) > 0.5
@@ -645,7 +688,7 @@ def _kill_switch_liquidate(client: TradingClient, positions: list, dry_run: bool
                     submitted += 1
                 except Exception as e:
                     err_msg = str(e).lower()
-                    if any(kw in err_msg for kw in ("already exists", "duplicate")):
+                    if any(kw in err_msg for kw in IDEMPOTENT_DUPLICATE_KEYWORDS):
                         log.info(f"    ✅ {sym} 逃生单此前已提交（client_order_id 重复，视为成功）")
                         submitted += 1
                         continue
@@ -724,7 +767,7 @@ def retry_halted_orders(dry_run: bool):
                 log.info(f"    ✅ {sym} 重试订单已提交")
             except Exception as e:
                 err_msg = str(e).lower()
-                if any(kw in err_msg for kw in ("already exists", "duplicate")):
+                if any(kw in err_msg for kw in IDEMPOTENT_DUPLICATE_KEYWORDS):
                     log.info(f"    ✅ {sym} 重试订单此前已提交（client_order_id 重复，视为成功）")
                 elif any(kw in err_msg for kw in ("halt", "not_tradable", "suspended", "asset_not_tradable")):
                     log.warning(f"    ⚠️ {sym} 仍停牌/熔断，5 分钟后继续重试")
@@ -1232,8 +1275,14 @@ def compute_rebalance_plan(
                         f"偏离 {dev:.0%}（阈值 {PRICE_SANITY_PCT:.0%}），疑似数据异常，跳过本次调仓"
                     )
                     continue
-        target_qty  = max(1, int(target_val / (price * 1.05)))
         current_qty = int(float(getattr(current_map[sym], "qty", 0) or 0)) if sym in current_map else 0
+        target_qty  = int(target_val / (price * 1.05))
+        if target_qty <= 0 and current_qty == 0:
+            log.warning(
+                f"  ⚠️  {sym} 单股价格 ${price:,.2f} 超过等权目标金额 ${target_val:,.2f}，"
+                f"买入 1 股会超配，跳过本次建仓"
+            )
+            continue
         delta       = target_qty - current_qty
         curr_val    = float(getattr(current_map[sym], "market_value", 0) or 0) if sym in current_map else 0.0
         drift       = (curr_val - target_val) / target_val if target_val > 0 else 0.0
@@ -1297,6 +1346,9 @@ def execute_sell_phase(client: TradingClient, state: dict, run_id: str, dry_run:
     sell_targets = [(c["symbol"], c["qty"], "close") for c in plan.get("close_all", [])] + \
                    [(t["symbol"], t["qty"], "trim") for t in plan.get("trim", [])]
 
+    if not dry_run:
+        cancel_stop_orders_for_symbols(client, [sym for sym, _, _ in sell_targets])
+
     data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
     orders_out = []
     for sym, qty, kind in sell_targets:
@@ -1313,13 +1365,14 @@ def execute_sell_phase(client: TradingClient, state: dict, run_id: str, dry_run:
             order_req = build_market_order(sym, qty, OrderSide.SELL, plan["signal_date"], kind)
             limit_txt = "market"
         else:
+            limit_price = round(bid, 2)
             client_order_id = f"tq-{_slug_date(plan['signal_date'])}-{kind}-{sym.lower()}"
             order_req = LimitOrderRequest(
                 symbol=sym, qty=qty, side=OrderSide.SELL,
-                time_in_force=TimeInForce.DAY, limit_price=bid,
+                time_in_force=TimeInForce.DAY, limit_price=limit_price,
                 client_order_id=client_order_id,
             )
-            limit_txt = f"${bid:.2f}"
+            limit_txt = f"${limit_price:.2f}"
         log.info(f"  SELL  {sym:8s} × {qty:4d}（{kind}）@ {limit_txt}")
         row = {
             "run_id": run_id, "signal_date": plan["signal_date"],
@@ -1337,7 +1390,7 @@ def execute_sell_phase(client: TradingClient, state: dict, run_id: str, dry_run:
                 client.submit_order(order_req)
             except Exception as e:
                 err_msg = str(e).lower()
-                if any(kw in err_msg for kw in ("already exists", "duplicate")):
+                if any(kw in err_msg for kw in IDEMPOTENT_DUPLICATE_KEYWORDS):
                     log.info(f"    ✅ {sym} 卖单此前已提交（client_order_id 重复，视为成功）")
                 else:
                     log.error(f"    ❌ 卖出失败 {sym}: {e}")
@@ -1383,6 +1436,7 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
 
     # ── 逐笔核实卖单成交（不能假设 DAY 单一定成交）────────────────────────────
     bad_symbols = set()
+    unresolved_sells = []  # 未完全成交的卖单，写回 cycle_plan 供下一轮 sell 阶段重试
     for o in pending.get("orders", []):
         cid = o["client_order_id"]
         try:
@@ -1390,15 +1444,21 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
             filled_qty = float(getattr(order, "filled_qty", 0) or 0)
             status_val = getattr(getattr(order, "status", ""), "value", str(getattr(order, "status", "")))
             if filled_qty < o["qty"]:
+                remaining = o["qty"] - filled_qty
                 issue = f"{o['symbol']} 卖单未完全成交（filled={filled_qty}/{o['qty']}, status={status_val}）"
                 log.warning(f"  ⚠️ {issue}")
                 summary["fill_issues"].append(issue)
                 bad_symbols.add(o["symbol"])
+                if remaining > 0:
+                    unresolved_sells.append({"symbol": o["symbol"], "qty": remaining, "kind": o.get("kind", "close")})
         except Exception as e:
+            # 查询失败时无法确认实际成交量，保守按"完全未成交"处理，宁可重复尝试卖出
+            # （若上次其实已成交，重试时会因 qty_available 不足而被券商拒绝，不会造成超卖）。
             issue = f"{o['symbol']} 卖单成交状态查询失败: {e}"
             log.warning(f"  ⚠️ {issue}")
             summary["fill_issues"].append(issue)
             bad_symbols.add(o["symbol"])
+            unresolved_sells.append({"symbol": o["symbol"], "qty": o["qty"], "kind": o.get("kind", "close")})
 
     summary["had_fill_issues"] = bool(bad_symbols)
 
@@ -1424,8 +1484,9 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
 
     orders_out = []
     for b in buy_carry:
-        qty = max(1, int(b["qty"] * scale)) if scale < 1.0 else b["qty"]
+        qty = int(b["qty"] * scale) if scale < 1.0 else b["qty"]
         if qty <= 0:
+            log.warning(f"  ⚠️ {b['symbol']} 缩减后数量为 0（资金不足），本轮跳过该标的买入")
             continue
         sym, price, is_new, drift = b["symbol"], b["price"], b.get("is_new", True), b.get("drift", 0.0)
         action_tag   = "enter" if is_new else "add"
@@ -1447,7 +1508,7 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
                 client.submit_order(order_req)
             except Exception as e:
                 err_msg = str(e).lower()
-                if any(kw in err_msg for kw in ("already exists", "duplicate")):
+                if any(kw in err_msg for kw in IDEMPOTENT_DUPLICATE_KEYWORDS):
                     log.info(f"    ✅ {sym} 买单此前已提交（client_order_id 重复，视为成功）")
                 elif any(kw in err_msg for kw in ("halt", "not_tradable", "suspended", "asset_not_tradable")):
                     log.warning(f"    ⚠️ {sym} 停牌/LULD 熔断，写入重试队列")
@@ -1475,6 +1536,26 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
         state["last_rebalance"] = str(today)
         state["last_order_signal_date"] = pending["signal_date"]
         state.pop(PENDING_SELL_KEY, None)
+        if unresolved_sells:
+            # 未确认成交的卖单不能就此放弃：写回一份新的 cycle_plan，close_all/trim 里只放
+            # 未成交剩余量，对应的买入决策一并带上，下一轮 sell 阶段会自动重试卖出，
+            # 再下一轮 buy 阶段重新核实并买入——避免这些标的被静默跳过、账户目标仓位永久跑偏。
+            retry_close = [{"symbol": s["symbol"], "qty": s["qty"]} for s in unresolved_sells if s["kind"] == "close"]
+            retry_trim  = [{"symbol": s["symbol"], "qty": s["qty"]} for s in unresolved_sells if s["kind"] != "close"]
+            retry_buy   = [b for b in pending.get("buy_carry", []) if b["symbol"] in bad_symbols]
+            retry_plan = {
+                "plan_date": str(today),
+                "signal_date": pending["signal_date"],
+                "close_all": retry_close,
+                "trim": retry_trim,
+                "buy": retry_buy,
+            }
+            state[CYCLE_PLAN_KEY] = retry_plan
+            summary["retry_plan_written"] = True
+            log.warning(
+                f"  ⚠️ {len(unresolved_sells)} 笔卖单未确认成交，已写回 cycle_plan 供下一轮重试："
+                f"close={[s['symbol'] for s in retry_close]} trim={[s['symbol'] for s in retry_trim]}"
+            )
     return summary
 
 
@@ -1550,12 +1631,29 @@ def rebalance(
         if sym not in close.columns:
             log.warning(f"  ⚠️  {sym} 无价格数据，跳过")
             continue
-        price = float(close[sym].dropna().iloc[-1])
+        sym_closes = close[sym].dropna()
+        price = float(sym_closes.iloc[-1])
         if price <= 0:
             log.warning(f"  ⚠️  {sym} 价格异常（{price}），跳过")
             continue
-        target_qty  = max(1, int(target_val / (price * 1.05)))  # 5% 缓冲防开盘跳空超支
+        if len(sym_closes) >= 2:
+            prev_price = float(sym_closes.iloc[-2])
+            if prev_price > 0:
+                dev = abs(price - prev_price) / prev_price
+                if dev > PRICE_SANITY_PCT:
+                    log.warning(
+                        f"  ⚠️  {sym} 最新价 {price:.4f} 相对前一交易日 {prev_price:.4f} "
+                        f"偏离 {dev:.0%}（阈值 {PRICE_SANITY_PCT:.0%}），疑似数据异常，跳过本次调仓"
+                    )
+                    continue
         current_qty = int(float(getattr(current_map[sym], "qty", 0) or 0)) if sym in current_map else 0
+        target_qty  = int(target_val / (price * 1.05))  # 5% 缓冲防开盘跳空超支
+        if target_qty <= 0 and current_qty == 0:
+            log.warning(
+                f"  ⚠️  {sym} 单股价格 ${price:,.2f} 超过等权目标金额 ${target_val:,.2f}，"
+                f"买入 1 股会超配，跳过本次建仓"
+            )
+            continue
         delta       = target_qty - current_qty
 
         curr_val = float(getattr(current_map[sym], "market_value", 0) or 0) if sym in current_map else 0.0
@@ -1616,7 +1714,12 @@ def rebalance(
                 client.submit_order(order_req)
                 n_orders += 1
             except Exception as e:
-                log.error(f"    ❌ 平仓失败 {sym}: {e}")
+                err_msg = str(e).lower()
+                if any(kw in err_msg for kw in IDEMPOTENT_DUPLICATE_KEYWORDS):
+                    log.info(f"    ✅ {sym} 平仓单此前已提交（client_order_id 重复，视为成功）")
+                    n_orders += 1
+                else:
+                    log.error(f"    ❌ 平仓失败 {sym}: {e}")
 
     for sym, qty, price, drift in trim_list:
         log.info(f"  TRIM  {sym:8s} × {qty:4d} @ ~${price:8.2f}  偏差={drift:+.1%}（等权减仓）")
@@ -1638,9 +1741,15 @@ def rebalance(
                 client.submit_order(order_req)
                 n_orders += 1
             except Exception as e:
-                log.error(f"    ❌ TRIM 失败 {sym}: {e}")
+                err_msg = str(e).lower()
+                if any(kw in err_msg for kw in IDEMPOTENT_DUPLICATE_KEYWORDS):
+                    log.info(f"    ✅ {sym} TRIM 单此前已提交（client_order_id 重复，视为成功）")
+                    n_orders += 1
+                else:
+                    log.error(f"    ❌ TRIM 失败 {sym}: {e}")
 
     # ── 2. BUY 阶段：新建 + add ──────────────────────────────────────────────────
+    failed_buys: list[str] = []
     for sym, qty, price, is_new, drift in buy_list:
         action_label = "新建" if is_new else f"加仓 drift={drift:+.1%}"
         log.info(f"  BUY   {sym:8s} × {qty:4d} @ ~${price:8.2f}  目标≈${target_val:,.0f}（{action_label}）")
@@ -1665,17 +1774,26 @@ def rebalance(
                 n_orders += 1
             except Exception as e:
                 err_msg = str(e).lower()
-                if any(kw in err_msg for kw in ("halt", "not_tradable", "suspended", "asset_not_tradable")):
+                if any(kw in err_msg for kw in IDEMPOTENT_DUPLICATE_KEYWORDS):
+                    log.info(f"    ✅ {sym} 买单此前已提交（client_order_id 重复，视为成功）")
+                    n_orders += 1
+                elif any(kw in err_msg for kw in ("halt", "not_tradable", "suspended", "asset_not_tradable")):
                     log.warning(f"    ⚠️ {sym} 停牌/LULD 熔断，写入重试队列")
                     _append_halt_pending(sym, qty, signal_date, run_id)
                 else:
+                    # 先记录失败继续处理下一个标的，不在循环内 raise：
+                    # 卖单可能已提交成功，若这里中断整个函数会让剩余待买标的完全得不到处理，
+                    # 账户停在"卖了没买"的半调仓状态。循环结束后统一 raise 供上层报警。
                     log.error(f"    ❌ 买入失败 {sym}: {e}")
-                    raise
+                    failed_buys.append(f"{sym}: {e}")
 
     if not close_all_list and not trim_list and not buy_list:
         log.info("  持仓无需变动（目标与当前完全一致）")
     elif dry_run:
         log.info("  [DRY RUN] 上述订单均未提交")
+
+    if failed_buys:
+        raise RuntimeError(f"以下 {len(failed_buys)} 笔买单提交失败: {'; '.join(failed_buys)}")
 
     return n_orders
 

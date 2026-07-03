@@ -403,6 +403,108 @@ class ExecutionSafetyTests(unittest.TestCase):
         self.assertNotIn(trader.CYCLE_PLAN_KEY, state)
         self.assertIn(trader.PENDING_SELL_KEY, state)
 
+    def test_sell_phase_cancels_existing_stop_orders_before_selling(self):
+        """回归用例：持仓已有 GTC 止损单时，sell 阶段必须先撤单，否则 qty 会被
+        止损单占满导致卖单被券商以 insufficient qty available 拒绝（HIGH-1）。"""
+        trader = load_trader_module()
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return {}
+
+        class StopOrder:
+            id = "stop-amat-1"
+            client_order_id = "tq-stop-amat"
+            symbol = "AMAT"
+
+        class Client:
+            def __init__(self):
+                self.cancelled = []
+                self.submitted = []
+
+            def get_orders(self, req):
+                return [StopOrder()]
+
+            def cancel_order_by_id(self, order_id):
+                self.cancelled.append(order_id)
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "sell-1", "status": "accepted"})()
+
+        state = {
+            trader.CYCLE_PLAN_KEY: {
+                "plan_date": "2026-06-22",
+                "signal_date": "2026-06-22",
+                "close_all": [{"symbol": "AMAT", "qty": 3, "market_value": 500.0}],
+                "trim": [],
+                "buy": [],
+            }
+        }
+
+        client = Client()
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient):
+            summary = trader.execute_sell_phase(client, state, "run-sell-stop", dry_run=False)
+
+        self.assertEqual(client.cancelled, ["stop-amat-1"])
+        self.assertEqual(len(client.submitted), 1)
+        self.assertFalse(summary["all_failed"])
+
+    def test_buy_phase_writes_retry_plan_for_unconfirmed_sell_fills(self):
+        """回归用例：卖单未确认完全成交时，剩余未卖出数量必须写回 cycle_plan
+        供下一轮 sell 阶段重试，而不是被静默丢弃导致目标仓位永久跑偏（MEDIUM-2）。"""
+        trader = load_trader_module()
+
+        class Order:
+            def __init__(self, filled_qty, status="filled"):
+                self.filled_qty = filled_qty
+                self.status = status
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def get_order_by_client_id(self, cid):
+                if cid == "tq-2026-06-22-close-amat":
+                    return Order(1)  # 只成交 1/3，剩余 2 股未卖出
+                return Order(2)
+
+            def get_account(self):
+                return Account()
+
+            def submit_order(self, req):
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+            def get_all_positions(self):
+                return []
+
+        state = {
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-06-23",
+                "signal_date": "2026-06-22",
+                "orders": [
+                    {"symbol": "AMAT", "qty": 3, "client_order_id": "tq-2026-06-22-close-amat", "kind": "close"},
+                ],
+                "buy_carry": [
+                    {"symbol": "AMAT", "qty": 2, "price": 100.0, "is_new": False, "drift": 0.0},
+                    {"symbol": "NVDA", "qty": 2, "price": 50.0, "is_new": True, "drift": 0.0},
+                ],
+            }
+        }
+
+        summary = trader.execute_buy_phase(Client(), state, "run-buy-retry", dry_run=False)
+
+        self.assertTrue(summary.get("retry_plan_written"))
+        self.assertNotIn(trader.PENDING_SELL_KEY, state)
+        self.assertIn(trader.CYCLE_PLAN_KEY, state)
+        retry_plan = state[trader.CYCLE_PLAN_KEY]
+        self.assertEqual(retry_plan["close_all"], [{"symbol": "AMAT", "qty": 2.0}])
+        self.assertEqual(retry_plan["trim"], [])
+        self.assertEqual([b["symbol"] for b in retry_plan["buy"]], ["AMAT"])
+
     def test_buy_phase_skips_symbols_with_unconfirmed_sell_fills(self):
         trader = load_trader_module()
 
