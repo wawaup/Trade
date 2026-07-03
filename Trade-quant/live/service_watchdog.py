@@ -19,7 +19,7 @@ from typing import Optional
 LIVE_DIR = Path(__file__).parent
 sys.path.insert(0, str(LIVE_DIR))
 
-from alpaca_trader import AUDIT_DIR, PAPER, _audit_attachments, build_email_subject, send_email
+from alpaca_trader import AUDIT_DIR, PAPER, _audit_attachments, build_email_subject, is_emergency_status, send_email
 
 
 @dataclass
@@ -77,6 +77,16 @@ def check_service_health(runs_path: Path, now_utc: datetime, max_age_hours: floa
             ok=False,
             status="service_stale",
             message=f"最近一次运行已过去 {age_hours:.1f}h，超过阈值 {max_age_hours:.1f}h",
+            last_run_id=row.get("run_id", ""),
+            last_run_at_utc=row.get("run_at_utc", ""),
+        )
+
+    last_status = row.get("status", "")
+    if is_emergency_status(last_status):
+        return HealthResult(
+            ok=False,
+            status="last_run_failed",
+            message=f"最近一次运行（{age_hours:.1f}h 前）状态为紧急状态 '{last_status}'，即使时间新鲜也需人工介入",
             last_run_id=row.get("run_id", ""),
             last_run_at_utc=row.get("run_at_utc", ""),
         )

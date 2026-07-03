@@ -50,14 +50,20 @@ if grep -q "YOUR_API_KEY_HERE" "$ENV_FILE"; then
     echo "      nano $ENV_FILE"
     exit 1
 fi
-echo "      .env 已配置"
+chmod 600 "$ENV_FILE"
+echo "      .env 已配置（权限已收紧为 600）"
 
 # ---------- 4. 创建日志目录 ----------
 echo "[4/5] 创建日志目录 $LOG_DIR..."
 sudo mkdir -p "$LOG_DIR"
 sudo chown "$(whoami)" "$LOG_DIR"
-chmod 755 "$LOG_DIR"
+chmod 750 "$LOG_DIR"
 touch "$LOG_DIR/trader.log"
+
+STATE_FILE="$PROJECT_ROOT/state.json"
+if [ -f "$STATE_FILE" ]; then
+    chmod 600 "$STATE_FILE"
+fi
 
 # ---------- 5. 注册 Cron Job ----------
 echo "[5/5] 注册 Cron Job（主策略 + 股票池监控 + 服务健康检查）..."
@@ -80,9 +86,15 @@ chmod +x "$RUNNER"
 
 # 所有时间均为美东时间（ET）。CRON_TZ 控制 cron 触发时间，TZ 传入脚本运行环境。
 UNIVERSE_CMD="10 16 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN universe_monitor.py >> $LOG_DIR/universe_monitor.log 2>&1"
-# OPG 开盘单提交窗口：19:00 ET ~ 次日 09:28 ET；盘后信号在 19:05 ET 提交次日开盘单。
-CRON_CMD="05 19 * * 1-5 TZ=America/New_York VENV_PYTHON=$PYTHON_BIN $RUNNER >> $LOG_DIR/trader.log 2>&1"
-# LULD 熔断重试：9:45 AM ET，OPG 被拒后约 15 分钟，重试循环直到 12:00 ET
+# 三阶段调仓（每个交易日都触发，脚本内部按 state.json 自行判断当天是否需要动作，
+# 非目标日快速返回，开销很小；节假日/周几的判断由 alpaca_trader.py 内部交易日历完成）：
+# plan — T 日收盘后 16:05 ET：计算目标持仓与买卖计划，写入 state.json，不下单
+PLAN_CMD="05 16 * * 1-5 TZ=America/New_York VENV_PYTHON=$PYTHON_BIN $RUNNER --phase plan >> $LOG_DIR/trader.log 2>&1"
+# sell — T+1 尾盘前 15:50 ET：读取计划，主动让价到买一价提交限价卖单，确保收盘前成交
+SELL_CMD="50 15 * * 1-5 TZ=America/New_York VENV_PYTHON=$PYTHON_BIN $RUNNER --phase sell >> $LOG_DIR/trader.log 2>&1"
+# buy — T+2 开盘前 09:15 ET：核实卖单成交后，用实际可用资金提交买单
+CRON_CMD="15 09 * * 1-5 TZ=America/New_York VENV_PYTHON=$PYTHON_BIN $RUNNER --phase buy >> $LOG_DIR/trader.log 2>&1"
+# LULD 熔断重试：9:45 AM ET，buy 阶段之后约 30 分钟，重试循环直到 12:00 ET
 HALT_RETRY_CMD="45 09 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN alpaca_trader.py --retry-halted >> $LOG_DIR/trader.log 2>&1"
 WATCHDOG_CMD="20 20 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN service_watchdog.py >> $LOG_DIR/watchdog.log 2>&1"
 CRON_BEGIN="# TRADE_QUANT_CRON_BEGIN"
@@ -99,6 +111,8 @@ echo "$CRON_BEGIN" >> "$TMPFILE"
 echo "CRON_TZ=America/New_York" >> "$TMPFILE"
 echo "TZ=America/New_York" >> "$TMPFILE"
 echo "$UNIVERSE_CMD" >> "$TMPFILE"
+echo "$PLAN_CMD" >> "$TMPFILE"
+echo "$SELL_CMD" >> "$TMPFILE"
 echo "$CRON_CMD" >> "$TMPFILE"
 echo "$HALT_RETRY_CMD" >> "$TMPFILE"
 echo "$WATCHDOG_CMD" >> "$TMPFILE"
@@ -112,6 +126,8 @@ echo "✅ 部署完成"
 echo ""
 echo "已注册 Cron："
 echo "  $UNIVERSE_CMD"
+echo "  $PLAN_CMD"
+echo "  $SELL_CMD"
 echo "  $CRON_CMD"
 echo "  $HALT_RETRY_CMD"
 echo "  $WATCHDOG_CMD"

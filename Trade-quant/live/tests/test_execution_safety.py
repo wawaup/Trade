@@ -36,7 +36,7 @@ class ExecutionSafetyTests(unittest.TestCase):
             "enter",
         )
 
-        self.assertEqual(order.time_in_force, trader.TimeInForce.OPG)
+        self.assertEqual(order.time_in_force, trader.TimeInForce.DAY)
         self.assertEqual(order.client_order_id, "tq-20260622-enter-aapl")
 
     def test_live_mode_requires_explicit_confirmation(self):
@@ -56,6 +56,21 @@ class ExecutionSafetyTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "SPY"):
             trader.validate_panel(close)
+
+    def test_validate_panel_rejects_stale_bar_when_today_expected(self):
+        trader = load_trader_module()
+        yesterday = trader.date.today() - trader.timedelta(days=1)
+        idx = pd.bdate_range(end=yesterday, periods=200)
+        cols = {f"SYM{i}": range(200) for i in range(trader.MIN_VALID_SYMBOLS)}
+        cols["QQQ"] = range(200)
+        cols["SPY"] = range(200)
+        close = pd.DataFrame(cols, index=idx)
+
+        with self.assertRaisesRegex(RuntimeError, "滞后"):
+            trader.validate_panel(close, expect_today=True)
+
+        # 不要求今日 bar 时，同样的数据应正常通过
+        trader.validate_panel(close, expect_today=False)
 
     def test_duplicate_signal_date_blocks_real_orders(self):
         trader = load_trader_module()
@@ -143,6 +158,7 @@ class ExecutionSafetyTests(unittest.TestCase):
                     Client(),
                     ["AMAT"],
                     close,
+                    5000.0,
                     5000.0,
                     dry_run=False,
                     signal_date="2026-06-23",
@@ -319,6 +335,341 @@ class ExecutionSafetyTests(unittest.TestCase):
         self.assertEqual(symbols, ["MSFT"])
         self.assertEqual(benchmarks, ["SPY", "QQQ"])
         build_universe.assert_not_called()
+
+    def test_sell_phase_all_orders_failed_keeps_cycle_plan(self):
+        trader = load_trader_module()
+
+        class FakeQuotes(dict):
+            pass
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return FakeQuotes()
+
+        class Client:
+            def submit_order(self, req):
+                raise RuntimeError("broker rejected order")
+
+        state = {
+            trader.CYCLE_PLAN_KEY: {
+                "plan_date": "2026-06-22",
+                "signal_date": "2026-06-22",
+                "close_all": [{"symbol": "AMAT", "qty": 3, "market_value": 500.0}],
+                "trim": [],
+                "buy": [{"symbol": "NVDA", "qty": 2, "price": 100.0, "is_new": True, "drift": 0.0}],
+            }
+        }
+
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient):
+            summary = trader.execute_sell_phase(Client(), state, "run-sell-fail", dry_run=False)
+
+        self.assertTrue(summary["all_failed"])
+        self.assertEqual(summary["orders"], [])
+        self.assertIn(trader.CYCLE_PLAN_KEY, state)
+        self.assertNotIn(trader.PENDING_SELL_KEY, state)
+
+    def test_sell_phase_partial_success_advances_cycle(self):
+        trader = load_trader_module()
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return {}
+
+        class Client:
+            def submit_order(self, req):
+                return type("Order", (), {"id": "sell-1", "status": "accepted"})()
+
+        state = {
+            trader.CYCLE_PLAN_KEY: {
+                "plan_date": "2026-06-22",
+                "signal_date": "2026-06-22",
+                "close_all": [{"symbol": "AMAT", "qty": 3, "market_value": 500.0}],
+                "trim": [],
+                "buy": [],
+            }
+        }
+
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient):
+            summary = trader.execute_sell_phase(Client(), state, "run-sell-ok", dry_run=False)
+
+        self.assertFalse(summary["all_failed"])
+        self.assertEqual(len(summary["orders"]), 1)
+        self.assertNotIn(trader.CYCLE_PLAN_KEY, state)
+        self.assertIn(trader.PENDING_SELL_KEY, state)
+
+    def test_buy_phase_skips_symbols_with_unconfirmed_sell_fills(self):
+        trader = load_trader_module()
+
+        class Order:
+            def __init__(self, filled_qty, status="filled"):
+                self.filled_qty = filled_qty
+                self.status = status
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def get_order_by_client_id(self, cid):
+                if cid == "tq-2026-06-22-close-amat":
+                    return Order(1)  # 只成交 1/3，未完全成交
+                return Order(2)
+
+            def get_account(self):
+                return Account()
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+        state = {
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-06-23",
+                "signal_date": "2026-06-22",
+                "orders": [
+                    {"symbol": "AMAT", "qty": 3, "client_order_id": "tq-2026-06-22-close-amat", "kind": "close"},
+                ],
+                "buy_carry": [
+                    {"symbol": "AMAT", "qty": 2, "price": 100.0, "is_new": False, "drift": 0.0},
+                    {"symbol": "NVDA", "qty": 2, "price": 50.0, "is_new": True, "drift": 0.0},
+                ],
+            }
+        }
+
+        client = Client()
+        summary = trader.execute_buy_phase(client, state, "run-buy-issue", dry_run=False)
+
+        self.assertTrue(summary["had_fill_issues"])
+        self.assertEqual(len(summary["fill_issues"]), 1)
+        bought_syms = [o["symbol"] for o in summary["orders"]]
+        self.assertNotIn("AMAT", bought_syms)
+        self.assertIn("NVDA", bought_syms)
+
+    def test_buy_phase_dispatch_marks_emergency_status_on_fill_issues(self):
+        trader = load_trader_module()
+
+        self.assertTrue(trader.is_emergency_status("buy_completed_with_issues"))
+        self.assertIn("紧急报警", trader.build_email_subject("buy_completed_with_issues", "run-1", paper=True))
+
+    def test_buy_phase_attaches_stop_orders_after_buy(self):
+        trader = load_trader_module()
+
+        class Position:
+            symbol = "NVDA"
+            qty = "2"
+            avg_entry_price = "50"
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def __init__(self):
+                self.stop_orders = []
+
+            def get_order_by_client_id(self, cid):
+                return type("Order", (), {"filled_qty": 3, "status": "filled"})()
+
+            def get_account(self):
+                return Account()
+
+            def get_orders(self, req):
+                return []
+
+            def submit_order(self, req):
+                if getattr(req, "stop_price", None) is not None:
+                    self.stop_orders.append(req)
+                return type("Order", (), {"id": "o-1", "status": "accepted"})()
+
+            def get_all_positions(self):
+                return [Position()]
+
+        state = {
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-06-23",
+                "signal_date": "2026-06-22",
+                "orders": [
+                    {"symbol": "AMAT", "qty": 3, "client_order_id": "tq-2026-06-22-close-amat", "kind": "close"},
+                ],
+                "buy_carry": [
+                    {"symbol": "NVDA", "qty": 2, "price": 50.0, "is_new": True, "drift": 0.0},
+                ],
+            }
+        }
+
+        client = Client()
+        summary = trader.execute_buy_phase(client, state, "run-buy-stop", dry_run=False)
+
+        self.assertEqual(summary["stop_orders_submitted"], 1)
+        self.assertEqual(len(client.stop_orders), 1)
+
+    def test_kill_switch_locked_force_closes_remaining_positions(self):
+        trader = load_trader_module()
+
+        class Position:
+            symbol = "AMAT"
+
+        class Client:
+            def __init__(self):
+                self.closed_all = False
+
+            def get_all_positions(self):
+                return [Position()]
+
+            def close_all_positions(self, cancel_orders=True):
+                self.closed_all = True
+
+        client = Client()
+        remaining = client.get_all_positions()
+        self.assertTrue(remaining)
+        client.close_all_positions(cancel_orders=True)
+        self.assertTrue(client.closed_all)
+
+    def test_kill_switch_after_hours_client_order_id_includes_date_and_handles_duplicate(self):
+        trader = load_trader_module()
+
+        class Position:
+            symbol = "AMAT"
+            qty = "3"
+            current_price = "100"
+            avg_entry_price = "100"
+
+        class Client:
+            def __init__(self):
+                self.submitted_ids = []
+
+            def cancel_orders(self):
+                pass
+
+            def submit_order(self, req):
+                self.submitted_ids.append(req.client_order_id)
+                if len(self.submitted_ids) == 1:
+                    return type("Order", (), {"id": "ks-1"})()
+                raise RuntimeError("order already exists with client_order_id")
+
+        client = Client()
+        today_slug = trader._slug_date(str(trader.date.today()))
+        with patch.object(trader, "_is_after_hours", return_value=True), \
+             patch.object(trader, "KILL_SWITCH_LIMIT_SLIPPAGE", 0.1):
+            trader._kill_switch_liquidate(client, [Position(), Position()], dry_run=False)
+
+        self.assertEqual(len(client.submitted_ids), 2)
+        for cid in client.submitted_ids:
+            self.assertTrue(cid.startswith(f"tq-ks-{today_slug}-amat"))
+
+    def test_compute_rebalance_plan_skips_symbol_with_price_spike(self):
+        trader = load_trader_module()
+        idx = pd.bdate_range("2026-06-01", periods=3)
+        close = pd.DataFrame({
+            "AMAT": [100.0, 101.0, 102.0],
+            "NVDA": [50.0, 51.0, 200.0],  # 相对前一日暴涨 >50%，疑似脏数据
+        }, index=idx)
+
+        class Client:
+            def get_all_positions(self):
+                return []
+
+        with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
+            plan = trader.compute_rebalance_plan(
+                Client(), ["AMAT", "NVDA"], close, equity=10000.0, buying_power=10000.0,
+                signal_date="2026-06-03",
+            )
+
+        bought_syms = [b["symbol"] for b in plan["buy"]]
+        self.assertIn("AMAT", bought_syms)
+        self.assertNotIn("NVDA", bought_syms)
+
+    def test_log_tail_redacts_sensitive_lines(self):
+        trader = load_trader_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "trader.log"
+            log_path.write_text(
+                "普通日志行\n"
+                "ALPACA_API_KEY=abc123 已加载\n"
+                "另一行正常日志\n",
+                encoding="utf-8",
+            )
+            with patch.object(trader, "LOG_FILE", log_path):
+                tail = trader._read_log_tail(10)
+
+        self.assertIn("普通日志行", tail)
+        self.assertIn("另一行正常日志", tail)
+        self.assertNotIn("abc123", tail)
+        self.assertIn("已脱敏", tail)
+
+    def test_get_upcoming_earnings_times_out_and_flags_degraded(self):
+        """多数标的的 yf.Ticker(...).calendar 调用挂起时，应在超时时间内返回，
+        且 degraded=True 用于提示财报避雷本次可能未完全生效，而不是无限期挂起主流程。"""
+        trader = load_trader_module()
+        import time as _time
+
+        class SlowTicker:
+            def __init__(self, sym):
+                self.sym = sym
+
+            @property
+            def calendar(self):
+                if self.sym in ("SLOW1", "SLOW2", "SLOW3"):
+                    _time.sleep(5)  # 远大于测试用的超短超时
+                    return None
+                return {"Earnings Date": []}
+
+        with patch.object(trader, "EARNINGS_LOOKUP_TIMEOUT_SEC", 0.2), \
+             patch.object(trader.yf, "Ticker", side_effect=SlowTicker):
+            start = _time.monotonic()
+            blackout, degraded = trader.get_upcoming_earnings(
+                ["SLOW1", "SLOW2", "SLOW3", "FAST1"], days_ahead=2
+            )
+            elapsed = _time.monotonic() - start
+
+        self.assertTrue(degraded)
+        self.assertEqual(blackout, set())
+        # 不应无限期挂起：即便有 3 个标的各 sleep 5s，线程池并发执行 + 超时保护应远快于串行 15s
+        self.assertLess(elapsed, 4.0)
+
+    def test_get_upcoming_earnings_not_degraded_when_all_succeed(self):
+        trader = load_trader_module()
+
+        class FastTicker:
+            def __init__(self, sym):
+                self.sym = sym
+
+            @property
+            def calendar(self):
+                return {"Earnings Date": []}
+
+        with patch.object(trader.yf, "Ticker", side_effect=FastTicker):
+            blackout, degraded = trader.get_upcoming_earnings(["A", "B", "C"], days_ahead=2)
+
+        self.assertFalse(degraded)
+        self.assertEqual(blackout, set())
+
+    def test_plan_email_flags_earnings_degraded_status(self):
+        trader = load_trader_module()
+        plan = {
+            "plan_date": "2026-07-02",
+            "signal_date": "2026-07-02",
+            "target_syms": ["AAPL"],
+            "target_val": 1000.0,
+            "close_all": [],
+            "trim": [],
+            "buy": [],
+            "est_sell_value": 0.0,
+            "est_buy_total": 0.0,
+            "est_available": 0.0,
+            "earnings_degraded": True,
+        }
+        status = "plan_saved" if not plan.get("earnings_degraded") else "plan_saved_earnings_degraded"
+        self.assertEqual(status, "plan_saved_earnings_degraded")
+        subject = trader.build_email_subject(status, "run123", True)
+        self.assertIn("财报避雷未完全生效", subject)
 
 
 if __name__ == "__main__":
