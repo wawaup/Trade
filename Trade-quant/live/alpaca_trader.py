@@ -363,6 +363,7 @@ def is_emergency_status(status: str) -> bool:
         "buy_completed_with_issues",
         "sell_submitted_with_issues",
         "pending_sell_stale_blocked",
+        "cycle_already_pending",
         "last_run_failed",
     }
     return status in emergency
@@ -384,7 +385,7 @@ def build_email_subject(status: str, run_id: str, paper: bool) -> str:
         "ok": "普通日报-运行成功",
         "skipped_rebalance_interval": "普通日报-非调仓日",
         "duplicate_signal_skipped": "普通日报-重复信号跳过",
-        "cycle_already_pending": "普通日报-上一周期未完成",
+        "cycle_already_pending": "紧急报警-上一周期未完成",
         "plan_saved": "普通日报-调仓计划已生成",
         "plan_saved_earnings_degraded": "警报-调仓计划已生成（财报避雷未完全生效）",
         "sell_submitted": "普通日报-卖出已提交",
@@ -1599,6 +1600,7 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
             # 写回的（针对未确认成交卖单的）重试计划整体顶掉、永久丢失。按 symbol 去重合并。
             existing_plan = state.get(CYCLE_PLAN_KEY) or {}
             if existing_plan and existing_plan.get("signal_date") != pending["signal_date"]:
+                summary["signal_date_mixed"] = True
                 log.error(
                     f"  ❌ 待合并的 cycle_plan signal_date（{existing_plan.get('signal_date')}）与本轮 "
                     f"pending_sell signal_date（{pending['signal_date']}）不一致，两个周期被意外混合，请人工核查 state.json"
@@ -2102,6 +2104,8 @@ def _main_impl(args, earnings_allow):
                     "",
                     "## 已提交买单（未确认成交标的本轮已跳过买入）",
                     *order_lines,
+                    *(["", "⚠️ 待合并的 cycle_plan 与 pending_sell signal_date 不一致，两个周期被意外混合，请人工核查 state.json"]
+                      if summary.get("signal_date_mixed") else []),
                 ])]
             log.info(f"[phase=buy] 完成，status={status}")
             return

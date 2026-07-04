@@ -672,6 +672,55 @@ class ExecutionSafetyTests(unittest.TestCase):
         self.assertEqual(len(bad_entries), 1)
         self.assertEqual(bad_entries[0]["qty"], 2)
 
+    def test_buy_phase_flags_signal_date_mismatch_on_merge(self):
+        """回归用例：待合并的 existing cycle_plan 与本轮 pending_sell 的 signal_date
+        不一致，说明两个本应独立的调仓周期被意外混合——必须在 summary 里留下可追踪的
+        标志（供邮件展示），而不能只打一行日志、让运维只能靠翻 log 才能发现。"""
+        trader = load_trader_module()
+
+        class Order:
+            def __init__(self, filled_qty, status="filled"):
+                self.filled_qty = filled_qty
+                self.status = status
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def get_order_by_client_id(self, cid):
+                return Order(1)
+
+            def get_account(self):
+                return Account()
+
+            def submit_order(self, req):
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+            def get_all_positions(self):
+                return []
+
+        state = {
+            trader.CYCLE_PLAN_KEY: {
+                "plan_date": "2026-07-02",
+                "signal_date": "2026-06-15",  # 来自更早的、不相关的周期
+                "close_all": [{"symbol": "BAD", "qty": 5}],
+                "trim": [],
+                "buy": [],
+            },
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-06-23",
+                "signal_date": "2026-06-22",
+                "orders": [
+                    {"symbol": "GOOD", "qty": 3, "client_order_id": "tq-2026-06-22-close-good", "kind": "close"},
+                ],
+                "buy_carry": [],
+            },
+        }
+
+        summary = trader.execute_buy_phase(Client(), state, "run-buy-mixed", dry_run=False)
+
+        self.assertTrue(summary.get("signal_date_mixed"))
+
     def test_sell_phase_blocks_when_pending_sell_not_yet_consumed(self):
         """回归用例：若上一轮 sell 阶段提交的卖单还没被 buy 阶段核实/消费（buy 阶段
         遗漏运行或崩溃），本轮 sell 阶段绝不能直接提交新卖单并覆盖 pending_sell——
