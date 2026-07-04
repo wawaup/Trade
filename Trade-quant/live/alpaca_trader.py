@@ -362,6 +362,7 @@ def is_emergency_status(status: str) -> bool:
         "kill_switch_triggered",
         "buy_completed_with_issues",
         "sell_submitted_with_issues",
+        "pending_sell_stale_blocked",
         "last_run_failed",
     }
     return status in emergency
@@ -388,6 +389,7 @@ def build_email_subject(status: str, run_id: str, paper: bool) -> str:
         "plan_saved_earnings_degraded": "警报-调仓计划已生成（财报避雷未完全生效）",
         "sell_submitted": "普通日报-卖出已提交",
         "sell_submitted_with_issues": "紧急报警-部分卖单提交失败",
+        "pending_sell_stale_blocked": "紧急报警-上一轮卖单未核实即被跳过",
         "buy_completed": "普通日报-调仓周期完成",
         "buy_completed_with_issues": "紧急报警-卖单未确认成交",
         "no_pending_plan": "普通日报-无待执行计划",
@@ -1343,9 +1345,18 @@ def execute_sell_phase(client: TradingClient, state: dict, run_id: str, dry_run:
     （吃买一价，确保收盘前迅速成交），写入 pending_sell，清空 cycle_plan。
     """
     plan = state.get(CYCLE_PLAN_KEY)
-    summary = {"had_plan": bool(plan), "orders": [], "buy_carry": [], "note": ""}
+    summary = {"had_plan": bool(plan), "orders": [], "buy_carry": [], "note": "", "blocked_stale_pending_sell": False}
     if not plan:
         log.info("  cycle_plan 为空，今日无待卖出计划。")
+        return summary
+
+    if state.get(PENDING_SELL_KEY):
+        # 上一轮 sell 阶段提交的卖单尚未被 buy 阶段核实/消费（大概率是 buy 阶段漏跑或崩溃），
+        # 此时若继续提交本轮卖单，下面对 PENDING_SELL_KEY 的无条件覆盖会让上一轮已成交卖单的
+        # 核实指针和 buy_carry 永久丢失。宁可本轮不提交、报警等待人工介入，也不要静默覆盖。
+        summary["blocked_stale_pending_sell"] = True
+        log.error("  ❌ 检测到未被 buy 阶段消费的 pending_sell，为避免覆盖丢失，本轮跳过卖出提交，"
+                   "请人工检查 buy 阶段是否遗漏运行")
         return summary
 
     today     = date.today()
@@ -1587,6 +1598,11 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
             # 重试计划写在这里；不能无条件覆盖，否则那批标的的清仓/减仓决策会被本次买入阶段
             # 写回的（针对未确认成交卖单的）重试计划整体顶掉、永久丢失。按 symbol 去重合并。
             existing_plan = state.get(CYCLE_PLAN_KEY) or {}
+            if existing_plan and existing_plan.get("signal_date") != pending["signal_date"]:
+                log.error(
+                    f"  ❌ 待合并的 cycle_plan signal_date（{existing_plan.get('signal_date')}）与本轮 "
+                    f"pending_sell signal_date（{pending['signal_date']}）不一致，两个周期被意外混合，请人工核查 state.json"
+                )
             seen_syms = {c["symbol"] for c in retry_close} | {t["symbol"] for t in retry_trim}
             retry_close = retry_close + [c for c in existing_plan.get("close_all", []) if c["symbol"] not in seen_syms]
             retry_trim  = retry_trim  + [t for t in existing_plan.get("trim", [])      if t["symbol"] not in seen_syms]
@@ -2015,6 +2031,15 @@ def _main_impl(args, earnings_allow):
                     "last_rebalance": state.get("last_rebalance"),
                     "cycle_plan_summary": "无", "pending_sell_summary": "无",
                 })]
+            elif summary.get("blocked_stale_pending_sell"):
+                status = "pending_sell_stale_blocked"
+                email_lines = ["\n".join([
+                    "## 今日结论：检测到未消费的 pending_sell，本轮跳过卖出提交",
+                    f"- run_id: {run_id}",
+                    "- ⚠️ 上一轮 sell 阶段提交的卖单尚未被 buy 阶段核实/消费（buy 阶段可能遗漏运行或崩溃）",
+                    "- 为避免覆盖丢失上一轮的卖单核实指针与买入计划，本轮未提交任何新卖单",
+                    "- 请人工检查 buy 阶段运行记录，确认后手动触发 --phase buy 补跑",
+                ])]
             elif summary.get("all_failed"):
                 status = "order_submit_failed"
                 email_lines = ["\n".join([

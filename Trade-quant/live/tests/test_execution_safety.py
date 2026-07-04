@@ -618,6 +618,95 @@ class ExecutionSafetyTests(unittest.TestCase):
         retry_symbols = {c["symbol"] for c in retry_plan["close_all"]}
         self.assertEqual(retry_symbols, {"BAD", "GOOD"})
 
+    def test_buy_phase_retry_merge_keeps_new_qty_on_overlapping_symbol(self):
+        """回归用例：existing cycle_plan 与本轮 buy 阶段重试计划里出现同一 symbol 时，
+        合并逻辑必须去重（不能重复计数同一标的两条记录），并以本轮核实到的最新 qty
+        为准，而不是简单拼接两个列表。"""
+        trader = load_trader_module()
+
+        class Order:
+            def __init__(self, filled_qty, status="filled"):
+                self.filled_qty = filled_qty
+                self.status = status
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def get_order_by_client_id(self, cid):
+                return Order(1)  # BAD 只成交 1/3，剩余 2 股未卖出
+
+            def get_account(self):
+                return Account()
+
+            def submit_order(self, req):
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+            def get_all_positions(self):
+                return []
+
+        state = {
+            # 上一轮遗留的 BAD 重试计划里 qty 是旧值 5（早已过时）
+            trader.CYCLE_PLAN_KEY: {
+                "plan_date": "2026-07-02",
+                "signal_date": "2026-06-22",
+                "close_all": [{"symbol": "BAD", "qty": 5}],
+                "trim": [],
+                "buy": [],
+            },
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-06-23",
+                "signal_date": "2026-06-22",
+                "orders": [
+                    {"symbol": "BAD", "qty": 3, "client_order_id": "tq-2026-06-22-close-bad", "kind": "close"},
+                ],
+                "buy_carry": [],
+            },
+        }
+
+        summary = trader.execute_buy_phase(Client(), state, "run-buy-dedup", dry_run=False)
+
+        self.assertTrue(summary.get("retry_plan_written"))
+        retry_plan = state[trader.CYCLE_PLAN_KEY]
+        bad_entries = [c for c in retry_plan["close_all"] if c["symbol"] == "BAD"]
+        self.assertEqual(len(bad_entries), 1)
+        self.assertEqual(bad_entries[0]["qty"], 2)
+
+    def test_sell_phase_blocks_when_pending_sell_not_yet_consumed(self):
+        """回归用例：若上一轮 sell 阶段提交的卖单还没被 buy 阶段核实/消费（buy 阶段
+        遗漏运行或崩溃），本轮 sell 阶段绝不能直接提交新卖单并覆盖 pending_sell——
+        那样会让上一轮已提交卖单的核实指针和 buy_carry 永久丢失。"""
+        trader = load_trader_module()
+
+        class Client:
+            def submit_order(self, req):
+                raise AssertionError("不应该在 pending_sell 未被消费时提交新卖单")
+
+        state = {
+            trader.CYCLE_PLAN_KEY: {
+                "plan_date": "2026-07-02",
+                "signal_date": "2026-07-02",
+                "close_all": [{"symbol": "BAD", "qty": 2}],
+                "trim": [],
+                "buy": [],
+            },
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-06-23",
+                "signal_date": "2026-06-22",
+                "orders": [
+                    {"symbol": "GOOD", "qty": 3, "client_order_id": "tq-2026-06-22-close-good", "kind": "close"},
+                ],
+                "buy_carry": [{"symbol": "GOOD", "qty": 2, "price": 100.0, "is_new": False, "drift": 0.0}],
+            },
+        }
+
+        summary = trader.execute_sell_phase(Client(), state, "run-sell-blocked", dry_run=False)
+
+        self.assertTrue(summary["blocked_stale_pending_sell"])
+        # pending_sell 必须原样保留，不能被覆盖或清空
+        self.assertEqual(state[trader.PENDING_SELL_KEY]["orders"][0]["symbol"], "GOOD")
+        self.assertEqual(state[trader.CYCLE_PLAN_KEY]["close_all"][0]["symbol"], "BAD")
+
     def test_sell_phase_retry_plan_uses_fresh_client_order_id_not_original(self):
         """回归用例：写回的重试 cycle_plan 再次进入 sell 阶段时，必须生成与原始
         卖单不同的 client_order_id，否则会被券商当作重复提交而实际从未真正下单，
