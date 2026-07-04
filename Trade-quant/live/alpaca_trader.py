@@ -361,9 +361,20 @@ def is_emergency_status(status: str) -> bool:
         "kill_switch_locked",
         "kill_switch_triggered",
         "buy_completed_with_issues",
+        "sell_submitted_with_issues",
         "last_run_failed",
     }
     return status in emergency
+
+
+# 这些状态下每个交易日/自然日都会被 cron 高频命中（如节假日），发日报纯属噪音，直接静默跳过。
+NO_EMAIL_STATUSES = {"not_a_trading_day"}
+
+
+def should_escalate_to_error(status: str) -> bool:
+    """免打扰状态若在其自身处理逻辑内部再抛异常（如 _save_state 失败），
+    不能让 finally 里的 NO_EMAIL_STATUSES 检查把这次真实故障也一起静默掉。"""
+    return status in ("started", "ok") or status in NO_EMAIL_STATUSES
 
 
 def build_email_subject(status: str, run_id: str, paper: bool) -> str:
@@ -376,6 +387,7 @@ def build_email_subject(status: str, run_id: str, paper: bool) -> str:
         "plan_saved": "普通日报-调仓计划已生成",
         "plan_saved_earnings_degraded": "警报-调仓计划已生成（财报避雷未完全生效）",
         "sell_submitted": "普通日报-卖出已提交",
+        "sell_submitted_with_issues": "紧急报警-部分卖单提交失败",
         "buy_completed": "普通日报-调仓周期完成",
         "buy_completed_with_issues": "紧急报警-卖单未确认成交",
         "no_pending_plan": "普通日报-无待执行计划",
@@ -1351,6 +1363,7 @@ def execute_sell_phase(client: TradingClient, state: dict, run_id: str, dry_run:
 
     data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
     orders_out = []
+    submit_failed = []  # 非幂等原因导致提交失败的标的，需写回 cycle_plan 供下一轮重试，不能静默丢弃
     for sym, qty, kind in sell_targets:
         bid = 0.0
         try:
@@ -1397,12 +1410,14 @@ def execute_sell_phase(client: TradingClient, state: dict, run_id: str, dry_run:
                     log.info(f"    ✅ {sym} 卖单此前已提交（client_order_id 重复，视为成功）")
                 else:
                     log.error(f"    ❌ 卖出失败 {sym}: {e}")
+                    submit_failed.append({"symbol": sym, "qty": qty, "kind": kind})
                     continue
         orders_out.append({"symbol": sym, "qty": qty, "client_order_id": order_req.client_order_id, "kind": kind})
 
-    summary["orders"]     = orders_out
-    summary["buy_carry"]  = plan.get("buy", [])
-    summary["all_failed"] = bool(sell_targets) and not orders_out
+    summary["orders"]        = orders_out
+    summary["buy_carry"]     = plan.get("buy", [])
+    summary["all_failed"]    = bool(sell_targets) and not orders_out
+    summary["submit_failed"] = submit_failed
 
     if not dry_run:
         if summary["all_failed"]:
@@ -1414,7 +1429,26 @@ def execute_sell_phase(client: TradingClient, state: dict, run_id: str, dry_run:
                 "orders": orders_out,
                 "buy_carry": plan.get("buy", []),
             }
-            state.pop(CYCLE_PLAN_KEY, None)
+            if submit_failed:
+                # 部分标的提交失败但另一部分成功：不能整体判定 all_failed，也不能让失败标的
+                # 随 cycle_plan 清空而永久消失——写回一份只含失败标的的新 cycle_plan，
+                # plan_date 用今天（避免 client_order_id 与本次已失败的提交撞车），
+                # 下一轮 sell 阶段会自动重新尝试这些标的的卖出。
+                retry_close = [{"symbol": f["symbol"], "qty": f["qty"]} for f in submit_failed if f["kind"] == "close"]
+                retry_trim  = [{"symbol": f["symbol"], "qty": f["qty"]} for f in submit_failed if f["kind"] != "close"]
+                state[CYCLE_PLAN_KEY] = {
+                    "plan_date": str(today),
+                    "signal_date": plan["signal_date"],
+                    "close_all": retry_close,
+                    "trim": retry_trim,
+                    "buy": [],
+                }
+                log.warning(
+                    f"  ⚠️ {len(submit_failed)} 笔卖单提交失败，已写回 cycle_plan 供下一轮重试："
+                    f"close={[f['symbol'] for f in retry_close]} trim={[f['symbol'] for f in retry_trim]}"
+                )
+            else:
+                state.pop(CYCLE_PLAN_KEY, None)
     return summary
 
 
@@ -1981,18 +2015,22 @@ def _main_impl(args, earnings_allow):
                     "- 请人工检查 API 连接/账户状态/标的是否可交易",
                 ])]
             else:
-                status = "sell_submitted"
+                had_submit_failures = bool(summary.get("submit_failed"))
+                status = "sell_submitted_with_issues" if had_submit_failures else "sell_submitted"
                 order_lines = [f"- {o['symbol']} {o['kind']} × {o['qty']}（client_order_id={o['client_order_id']}）"
                                for o in summary["orders"]] or ["- 无实际提交（全部下单失败，请查日志）"]
                 buy_carry_lines = [f"- {b['symbol']} × {b['qty']} @ ~${b['price']:.2f}"
                                     for b in summary["buy_carry"]] or ["- 无后续买入计划"]
+                failed_lines = [f"- {f['symbol']} {f['kind']} × {f['qty']}（提交失败，已写回 cycle_plan 供下轮重试）"
+                                 for f in summary.get("submit_failed", [])]
                 email_lines = ["\n".join([
-                    "## 今日结论：尾盘前卖出已提交",
+                    "## 今日结论：尾盘前卖出已提交" + ("（部分标的提交失败，需人工复核）" if had_submit_failures else ""),
                     f"- run_id: {run_id}",
                     f"- 提示: {summary['note']}" if summary["note"] else "",
                     "",
                     "## 已提交卖单",
                     *order_lines,
+                    *(["", "## ⚠️ 提交失败标的"] + failed_lines if failed_lines else []),
                     "",
                     "## 次日开盘前将执行的买入计划预览",
                     *buy_carry_lines,
@@ -2197,7 +2235,7 @@ def _main_impl(args, earnings_allow):
         log.info(f"\n本次执行完成，提交 {n} 笔订单")
         log.info("=" * 64)
     except Exception:
-        if status in ("started", "ok"):
+        if should_escalate_to_error(status):
             status = "error"
         err = traceback.format_exc()
         log.error(err)
@@ -2212,14 +2250,17 @@ def _main_impl(args, earnings_allow):
             "dry_run": args.dry_run,
             **run_summary,
         })
-        try:
-            send_email(
-                build_email_subject(status, run_id, PAPER),
-                "\n".join(email_lines) if email_lines else f"run_id: {run_id}\nstatus: {status}",
-                _audit_attachments(),
-            )
-        except Exception as email_e:
-            log.warning(f"邮件发送失败: {email_e}")
+        if status in NO_EMAIL_STATUSES:
+            log.info(f"status={status} 在免打扰名单中，不发送日报邮件")
+        else:
+            try:
+                send_email(
+                    build_email_subject(status, run_id, PAPER),
+                    "\n".join(email_lines) if email_lines else f"run_id: {run_id}\nstatus: {status}",
+                    _audit_attachments(),
+                )
+            except Exception as email_e:
+                log.warning(f"邮件发送失败: {email_e}")
 
 
 if __name__ == "__main__":

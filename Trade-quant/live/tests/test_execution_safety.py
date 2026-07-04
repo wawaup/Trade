@@ -874,6 +874,66 @@ class ExecutionSafetyTests(unittest.TestCase):
         subject = trader.build_email_subject(status, "run123", True)
         self.assertIn("财报避雷未完全生效", subject)
 
+    def test_sell_phase_writes_retry_cycle_plan_for_partially_failed_submissions(self):
+        """回归用例：sell 阶段部分标的提交失败（非幂等错误）时不能被 all_failed 掩盖——
+        all_failed 只在全部标的都失败时才为真，若有其它标的成功，失败标的必须写回一份
+        新的 cycle_plan 供下一轮重试，否则会随成功标的推进而被静默清空、永久丢失。"""
+        trader = load_trader_module()
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return {}
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def submit_order(self, req):
+                if req.symbol == "BAD":
+                    raise RuntimeError("insufficient shares to sell")
+                self.submitted.append(req)
+                return type("Order", (), {"id": "sell-1", "status": "accepted"})()
+
+        plan = {
+            "plan_date": "2026-07-01",
+            "signal_date": "2026-07-01",
+            "close_all": [{"symbol": "GOOD", "qty": 3}, {"symbol": "BAD", "qty": 2}],
+            "trim": [],
+            "buy": [{"symbol": "NVDA", "qty": 1, "price": 100.0, "is_new": True}],
+        }
+        state = {trader.CYCLE_PLAN_KEY: plan}
+        client = Client()
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient):
+            summary = trader.execute_sell_phase(client, state, "run-sell-partial", dry_run=False)
+
+        self.assertFalse(summary["all_failed"])
+        self.assertEqual([f["symbol"] for f in summary["submit_failed"]], ["BAD"])
+
+        pending = state[trader.PENDING_SELL_KEY]
+        self.assertEqual([o["symbol"] for o in pending["orders"]], ["GOOD"])
+
+        retry_plan = state[trader.CYCLE_PLAN_KEY]
+        self.assertEqual([c["symbol"] for c in retry_plan["close_all"]], ["BAD"])
+        self.assertEqual(retry_plan["close_all"][0]["qty"], 2)
+        self.assertEqual(retry_plan["trim"], [])
+        self.assertEqual(retry_plan["signal_date"], "2026-07-01")
+        self.assertNotEqual(retry_plan["plan_date"], "2026-07-01")
+
+    def test_should_escalate_to_error_covers_no_email_statuses(self):
+        """回归用例：非交易日等免打扰状态若在其处理逻辑内部再抛异常（如 _save_state 写盘
+        失败），必须仍能升级为 error 并触发邮件——否则一次真实故障会被 NO_EMAIL_STATUSES
+        的静默逻辑连带吞掉，运维完全无感知。"""
+        trader = load_trader_module()
+
+        for status in trader.NO_EMAIL_STATUSES:
+            self.assertTrue(trader.should_escalate_to_error(status))
+        self.assertTrue(trader.should_escalate_to_error("started"))
+        self.assertTrue(trader.should_escalate_to_error("ok"))
+        self.assertFalse(trader.should_escalate_to_error("sell_submitted"))
+
 
 if __name__ == "__main__":
     unittest.main()
