@@ -1583,6 +1583,15 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
             retry_buy = [
                 {**b, "is_new": False} for b in pending.get("buy_carry", []) if b["symbol"] in bad_symbols
             ]
+            # cycle_plan 此时可能已经非空——sell 阶段若曾有标的提交失败，会把只含那些标的的
+            # 重试计划写在这里；不能无条件覆盖，否则那批标的的清仓/减仓决策会被本次买入阶段
+            # 写回的（针对未确认成交卖单的）重试计划整体顶掉、永久丢失。按 symbol 去重合并。
+            existing_plan = state.get(CYCLE_PLAN_KEY) or {}
+            seen_syms = {c["symbol"] for c in retry_close} | {t["symbol"] for t in retry_trim}
+            retry_close = retry_close + [c for c in existing_plan.get("close_all", []) if c["symbol"] not in seen_syms]
+            retry_trim  = retry_trim  + [t for t in existing_plan.get("trim", [])      if t["symbol"] not in seen_syms]
+            seen_buy_syms = {b["symbol"] for b in retry_buy}
+            retry_buy = retry_buy + [b for b in existing_plan.get("buy", []) if b["symbol"] not in seen_buy_syms]
             retry_plan = {
                 "plan_date": str(today),
                 "signal_date": pending["signal_date"],

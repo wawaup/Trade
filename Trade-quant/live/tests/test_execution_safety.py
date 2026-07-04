@@ -562,6 +562,62 @@ class ExecutionSafetyTests(unittest.TestCase):
         self.assertEqual([b["symbol"] for b in retry_plan["buy"]], ["AMAT"])
         self.assertFalse(retry_plan["buy"][0]["is_new"])
 
+    def test_buy_phase_merges_retry_plan_with_preexisting_cycle_plan(self):
+        """回归用例：sell 阶段可能已经因为某标的提交失败而写回了一份只含该标的的
+        cycle_plan（如 BAD）；buy 阶段随后因另一标的（如 GOOD）卖单未确认成交也要
+        写回重试计划时，绝不能无条件覆盖掉 BAD 的条目——否则 BAD 的清仓决策会被
+        静默顶掉、永久丢失，且不会有任何报警（此前只在提交失败当天报过一次）。"""
+        trader = load_trader_module()
+
+        class Order:
+            def __init__(self, filled_qty, status="filled"):
+                self.filled_qty = filled_qty
+                self.status = status
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def get_order_by_client_id(self, cid):
+                return Order(1)  # GOOD 只成交 1/3，剩余 2 股未卖出
+
+            def get_account(self):
+                return Account()
+
+            def submit_order(self, req):
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+            def get_all_positions(self):
+                return []
+
+        state = {
+            # sell 阶段此前因 BAD 提交失败写回的重试计划，尚未被任何后续 sell 阶段消费
+            trader.CYCLE_PLAN_KEY: {
+                "plan_date": "2026-07-02",
+                "signal_date": "2026-06-22",
+                "close_all": [{"symbol": "BAD", "qty": 2}],
+                "trim": [],
+                "buy": [],
+            },
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-06-23",
+                "signal_date": "2026-06-22",
+                "orders": [
+                    {"symbol": "GOOD", "qty": 3, "client_order_id": "tq-2026-06-22-close-good", "kind": "close"},
+                ],
+                "buy_carry": [
+                    {"symbol": "GOOD", "qty": 2, "price": 100.0, "is_new": False, "drift": 0.0},
+                ],
+            },
+        }
+
+        summary = trader.execute_buy_phase(Client(), state, "run-buy-merge", dry_run=False)
+
+        self.assertTrue(summary.get("retry_plan_written"))
+        retry_plan = state[trader.CYCLE_PLAN_KEY]
+        retry_symbols = {c["symbol"] for c in retry_plan["close_all"]}
+        self.assertEqual(retry_symbols, {"BAD", "GOOD"})
+
     def test_sell_phase_retry_plan_uses_fresh_client_order_id_not_original(self):
         """回归用例：写回的重试 cycle_plan 再次进入 sell 阶段时，必须生成与原始
         卖单不同的 client_order_id，否则会被券商当作重复提交而实际从未真正下单，
