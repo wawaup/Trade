@@ -110,6 +110,14 @@ HALT_RETRY_UNTIL_HOUR_ET  = int(os.getenv("HALT_RETRY_UNTIL_HOUR_ET", "12"))
 # 设置后仅用此金额代替账户净值计算买入数量，账户净值/回撤/Kill Switch 判断仍基于真实账户（百分比口径不受影响）
 SIM_CAPITAL_USD = float(os.getenv("SIM_CAPITAL_USD", "0"))
 
+# 单标的仓位集中度上限：等权分配（可投资金额 / 候选数）超过此比例时按此比例封顶，
+# 避免当日选股候选数过少（甚至只有1只）时单票吃满绝大部分资金——候选不足时宁可空仓，不加仓填满
+MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", "0.50"))
+
+# 最小现金缓冲：仓位计算只用 (1 - 此比例) 的资金去分配，其余始终留作现金，
+# 而不是把 100% 净值/模拟资金全部平分给候选标的
+MIN_CASH_BUFFER_PCT = float(os.getenv("MIN_CASH_BUFFER_PCT", "0.05"))
+
 # 已确认不可再直接从行情源获取的旧代码。IIVI 已并入/更名为 COHR，池子中已保留 COHR。
 STALE_SYMBOLS = {"IIVI"}
 
@@ -361,6 +369,7 @@ def is_emergency_status(status: str) -> bool:
         "kill_switch_locked",
         "kill_switch_triggered",
         "buy_completed_with_issues",
+        "buy_submitted_with_issues",
         "sell_submitted_with_issues",
         "pending_sell_stale_blocked",
         "cycle_already_pending",
@@ -393,6 +402,8 @@ def build_email_subject(status: str, run_id: str, paper: bool) -> str:
         "pending_sell_stale_blocked": "紧急报警-上一轮卖单未核实即被跳过",
         "buy_completed": "普通日报-调仓周期完成",
         "buy_completed_with_issues": "紧急报警-卖单未确认成交",
+        "buy_submitted_pending_confirmation": "普通日报-买单已提交待成交核实",
+        "buy_submitted_with_issues": "紧急报警-买单提交存在失败",
         "no_pending_plan": "普通日报-无待执行计划",
         "not_a_trading_day": "普通日报-非交易日跳过",
         "api_connection_failed": "紧急报警-API连接失败",
@@ -563,7 +574,20 @@ def _fetch_earnings_calendar(sym: str):
     return yf.Ticker(sym).calendar
 
 
-def get_upcoming_earnings(symbols: list[str], days_ahead: int = 2) -> tuple[set[str], bool]:
+def _today_et() -> date:
+    return datetime.now(ZoneInfo("America/New_York")).date()
+
+
+def earnings_window_bounds(start_date: date, days_ahead: int) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """返回包含执行日及其后 N 个 NYSE 交易日的财报避雷窗口。"""
+    cutoff_date = start_date
+    for _ in range(max(days_ahead, 0)):
+        cutoff_date = next_trading_day(cutoff_date)
+    return pd.Timestamp(start_date).normalize(), pd.Timestamp(cutoff_date).normalize()
+
+
+def get_upcoming_earnings(symbols: list[str], days_ahead: int = 2,
+                          details: Optional[dict] = None) -> tuple[set[str], bool]:
     """返回 (blackout, degraded)：
     blackout 为在未来 days_ahead 个交易日内发布财报的股票集合（财报避雷针）；
     degraded 表示本次查询是否有过半标的失败/超时（财报避雷本次可能未完全生效）。
@@ -572,12 +596,14 @@ def get_upcoming_earnings(symbols: list[str], days_ahead: int = 2) -> tuple[set[
     但整体失败率过高时需要在邮件里显式提示，而不是完全静默。
     """
     if days_ahead <= 0:
+        if details is not None:
+            details["failed_symbols"] = []
         return set(), False
     blackout: set[str] = set()
-    today = pd.Timestamp.today().normalize()
-    cutoff = today + pd.offsets.BDay(days_ahead)
+    today, cutoff = earnings_window_bounds(_today_et(), days_ahead)
     check_syms = [s for s in symbols if s not in ("QQQ", "SPY")]
     failed = 0
+    failed_symbols: set[str] = set()
     # 注意：不用 `with ThreadPoolExecutor(...) as pool` —— yf 的网络调用一旦发起无法从
     # 外部中断，若用 with 语句，退出时会阻塞等待所有（含已超时的慢）线程跑完，超时保护形同虚设。
     # 这里改为 shutdown(wait=False)：本函数按全局截止时间及时返回，慢线程留给后台线程池自行
@@ -627,6 +653,7 @@ def get_upcoming_earnings(symbols: list[str], days_ahead: int = 2) -> tuple[set[
                             break
                 except Exception as e:
                     failed += 1
+                    failed_symbols.add(sym)
                     log.warning(f"  {sym} 财报日历查询失败（跳过，默认放行）: {e}")
         except FutureTimeoutError:
             pass
@@ -634,13 +661,22 @@ def get_upcoming_earnings(symbols: list[str], days_ahead: int = 2) -> tuple[set[
             for fut in pending:
                 sym = futures[fut]
                 failed += 1
+                failed_symbols.add(sym)
                 log.warning(f"  {sym} 财报日历查询超时（全局 {EARNINGS_LOOKUP_TIMEOUT_SEC:.0f}s 截止未完成，跳过，默认放行）")
     finally:
         pool.shutdown(wait=False)
     degraded = bool(check_syms) and (failed / len(check_syms)) > 0.5
     if degraded:
         log.warning(f"  ⚠️ 财报避雷本次可能未完全生效：{failed}/{len(check_syms)} 只股票查询失败/超时")
+    if details is not None:
+        details["failed_symbols"] = sorted(failed_symbols)
     return blackout, degraded
+
+
+def lookup_upcoming_earnings(symbols: list[str], days_ahead: int) -> tuple[set[str], bool, set[str]]:
+    details: dict = {}
+    blackout, degraded = get_upcoming_earnings(symbols, days_ahead, details=details)
+    return blackout, degraded, set(details.get("failed_symbols", []))
 
 
 def _append_halt_pending(sym: str, qty: int, signal_date: str, run_id: str):
@@ -725,7 +761,22 @@ def _kill_switch_liquidate(client: TradingClient, positions: list, dry_run: bool
                 log.error(f"  close_all_positions 失败: {e}")
 
 
-def retry_halted_orders(dry_run: bool):
+def _mark_pending_buy_halt_retry(state: Optional[dict], sym: str, client_order_id: str):
+    if not state or not state.get(PENDING_BUY_KEY):
+        return
+    orders = state[PENDING_BUY_KEY].get("orders", [])
+    for item in orders:
+        if (
+            item.get("symbol") == sym
+            and item.get("status") in {"halted", "query_error"}
+            and not item.get("halt_retry")
+        ):
+            item["client_order_id"] = client_order_id
+            item["status"] = "submitted"
+            item["halt_retry"] = True
+
+
+def retry_halted_orders(dry_run: bool, state: Optional[dict] = None):
     """重试因 LULD 熔断被拒的买入单，每 5 分钟一次，直到 HALT_RETRY_UNTIL_HOUR_ET 时（ET）。"""
     if not HALT_PENDING_FILE.exists():
         log.info("未找到 halt_pending.json，无需重试，退出")
@@ -779,11 +830,14 @@ def retry_halted_orders(dry_run: bool):
                 log.info(f"    RETRY BUY {sym} × {qty} @ ${limit_price:.2f}")
                 if not dry_run:
                     client.submit_order(limit_req)
+                    _mark_pending_buy_halt_retry(state, sym, cid)
                 log.info(f"    ✅ {sym} 重试订单已提交")
             except Exception as e:
                 err_msg = str(e).lower()
                 if any(kw in err_msg for kw in IDEMPOTENT_DUPLICATE_KEYWORDS):
                     log.info(f"    ✅ {sym} 重试订单此前已提交（client_order_id 重复，视为成功）")
+                    if not dry_run:
+                        _mark_pending_buy_halt_retry(state, sym, cid)
                 elif any(kw in err_msg for kw in ("halt", "not_tradable", "suspended", "asset_not_tradable")):
                     log.warning(f"    ⚠️ {sym} 仍停牌/熔断，5 分钟后继续重试")
                     still_pending.append(o)
@@ -806,6 +860,19 @@ def _money(value) -> str:
         return f"${float(value):,.2f}"
     except (TypeError, ValueError):
         return "$0.00"
+
+
+def sell_earnings_email_lines(summary: dict) -> list[str]:
+    lines = []
+    forced = summary.get("earnings_forced_close") or []
+    if forced:
+        lines.append(f"- 📅 财报复核新增强制清仓: {forced}")
+    failed = summary.get("earnings_recheck_failed_symbols") or []
+    if failed:
+        lines.append(f"- ⚠️ 财报日历查询失败并默认放行: {failed}")
+    if summary.get("earnings_recheck_degraded"):
+        lines.append("- ⚠️ 财报日历查询降级（本轮未能完整复核，请留意后续手动核查）")
+    return lines
 
 
 def _position_line(p) -> str:
@@ -1226,6 +1293,19 @@ def compute_today_signals(
 # ── 三阶段调仓状态机：plan（T日收盘后）→ sell（T+1尾盘前）→ buy（T+2开盘前）────────
 CYCLE_PLAN_KEY   = "cycle_plan"    # phase=plan 写入，phase=sell 消费后清空
 PENDING_SELL_KEY = "pending_sell"  # phase=sell 写入，phase=buy 消费后清空
+PENDING_BUY_KEY  = "pending_buy"   # phase=buy 写入，成交核实并补挂止损后清空
+
+
+def has_incomplete_cycle(state: dict) -> bool:
+    return any(state.get(key) for key in (CYCLE_PLAN_KEY, PENDING_SELL_KEY, PENDING_BUY_KEY))
+
+
+def buy_phase_status(summary: dict) -> str:
+    if summary.get("buy_pending"):
+        if summary.get("submit_failed") or summary.get("had_fill_issues"):
+            return "buy_submitted_with_issues"
+        return "buy_submitted_pending_confirmation"
+    return "buy_completed_with_issues" if summary.get("had_fill_issues") else "buy_completed"
 
 
 def compute_rebalance_plan(
@@ -1247,9 +1327,12 @@ def compute_rebalance_plan(
 
     earnings_blackout: set = set()
     earnings_degraded = False
+    earnings_failed_symbols: set = set()
     if EARNINGS_BLACKOUT_DAYS > 0:
         check_syms = list((target_set | set(current_map.keys())) - {"QQQ", "SPY"})
-        earnings_blackout, earnings_degraded = get_upcoming_earnings(check_syms, EARNINGS_BLACKOUT_DAYS)
+        earnings_blackout, earnings_degraded, earnings_failed_symbols = lookup_upcoming_earnings(
+            check_syms, EARNINGS_BLACKOUT_DAYS
+        )
         if earnings_allow:
             overridden = earnings_blackout & earnings_allow
             if overridden:
@@ -1259,16 +1342,7 @@ def compute_rebalance_plan(
             log.warning(f"  📅 财报避雷命中：{sorted(earnings_blackout)} 移出买入计划并强制出场")
             target_set -= earnings_blackout
 
-    target_val = equity / len(target_set) if target_set else 0.0
-    close_all, trim, buy = [], [], []
-
-    for sym in current_map:
-        if sym not in target_set or sym in earnings_blackout:
-            mv  = float(getattr(current_map[sym], "market_value", 0) or 0)
-            qty = int(float(getattr(current_map[sym], "qty", 0) or 0))
-            if qty > 0:
-                close_all.append({"symbol": sym, "qty": qty, "market_value": round(mv, 2)})
-
+    target_snapshot: dict[str, dict[str, float]] = {}
     for sym in target_syms:
         if sym not in target_set:
             continue
@@ -1276,6 +1350,9 @@ def compute_rebalance_plan(
             log.warning(f"  ⚠️  {sym} 无价格数据，跳过")
             continue
         sym_closes = close[sym].dropna()
+        if sym_closes.empty:
+            log.warning(f"  ⚠️  {sym} 无有效价格数据，跳过")
+            continue
         price = float(sym_closes.iloc[-1])
         if price <= 0:
             log.warning(f"  ⚠️  {sym} 价格异常（{price}），跳过")
@@ -1290,6 +1367,24 @@ def compute_rebalance_plan(
                         f"偏离 {dev:.0%}（阈值 {PRICE_SANITY_PCT:.0%}），疑似数据异常，跳过本次调仓"
                     )
                     continue
+        target_snapshot[sym] = {"price": round(price, 4)}
+
+    investable = equity * (1 - MIN_CASH_BUFFER_PCT)
+    target_n = len(target_snapshot)
+    target_val = min(investable / target_n, equity * MAX_POSITION_PCT) if target_n else 0.0
+    close_all, trim, buy = [], [], []
+
+    for sym in current_map:
+        if sym not in target_set or sym in earnings_blackout:
+            mv  = float(getattr(current_map[sym], "market_value", 0) or 0)
+            qty = int(float(getattr(current_map[sym], "qty", 0) or 0))
+            if qty > 0:
+                close_all.append({"symbol": sym, "qty": qty, "market_value": round(mv, 2)})
+
+    for sym in target_syms:
+        if sym not in target_snapshot:
+            continue
+        price = target_snapshot[sym]["price"]
         current_qty = int(float(getattr(current_map[sym], "qty", 0) or 0)) if sym in current_map else 0
         target_qty  = int(target_val / (price * 1.05))
         if target_qty <= 0 and current_qty == 0:
@@ -1336,11 +1431,15 @@ def compute_rebalance_plan(
         "est_buy_total": round(est_buy_total, 2),
         "est_available": round(est_available, 2),
         "earnings_degraded": earnings_degraded,
+        "earnings_failed_symbols": sorted(earnings_failed_symbols),
+        "target_n": target_n,
+        "target_snapshot": target_snapshot,
     }
 
 
 def execute_sell_phase(client: TradingClient, state: dict, run_id: str, dry_run: bool,
-                        audit: Optional[AuditWriter] = None) -> dict:
+                        audit: Optional[AuditWriter] = None,
+                        earnings_allow: Optional[set] = None) -> dict:
     """
     phase=sell（T+1 尾盘前运行）：读取 cycle_plan，对 close_all/trim 提交限价卖单
     （吃买一价，确保收盘前迅速成交），写入 pending_sell，清空 cycle_plan。
@@ -1369,6 +1468,57 @@ def execute_sell_phase(client: TradingClient, state: dict, run_id: str, dry_run:
 
     sell_targets = [(c["symbol"], c["qty"], "close") for c in plan.get("close_all", [])] + \
                    [(t["symbol"], t["qty"], "trim") for t in plan.get("trim", [])]
+
+    # ── 财报避雷复核：plan 阶段判断的避雷名单可能因跨日延迟而过期，这里对"计划仍继续
+    # 持有/减仓/加仓"的标的重新查一次财报日历。命中的标的一律升级为全额强制清仓
+    # （与 compute_rebalance_plan 里"命中避雷即移出 target_set"的语义保持一致，
+    # 不因为它原本只是 trim 就放过），并从 buy_carry 中剔除对应的加仓/新建计划。
+    earnings_forced_syms: set = set()
+    earnings_recheck_degraded = False
+    earnings_recheck_failed_symbols: set = set()
+    current_map: dict = {}
+    if EARNINGS_BLACKOUT_DAYS > 0:
+        positions = client.get_all_positions()
+        current_map = {p.symbol: p for p in positions}
+        already_closing = {sym for sym, _, kind in sell_targets if kind == "close"}
+        watch_syms = list((set(current_map.keys()) - already_closing) - {"QQQ", "SPY"})
+        if watch_syms:
+            new_blackout, earnings_recheck_degraded, earnings_recheck_failed_symbols = lookup_upcoming_earnings(
+                watch_syms, EARNINGS_BLACKOUT_DAYS
+            )
+            if earnings_allow:
+                overridden = new_blackout & earnings_allow
+                if overridden:
+                    log.warning(f"  ⚠️ sell 阶段手动豁免财报避雷：{sorted(overridden)}")
+                    new_blackout -= earnings_allow
+            for sym in new_blackout:
+                qty = int(float(getattr(current_map[sym], "qty", 0) or 0))
+                if qty > 0:
+                    earnings_forced_syms.add(sym)
+            if earnings_forced_syms:
+                log.warning(
+                    f"  📅 sell 阶段财报复核命中：{sorted(earnings_forced_syms)}，"
+                    f"改为强制清仓（覆盖原 HOLD/trim/加仓计划）"
+                )
+
+    if earnings_forced_syms:
+        sell_targets = [(sym, qty, kind) for sym, qty, kind in sell_targets if sym not in earnings_forced_syms]
+        sell_targets += [
+            (sym, int(float(getattr(current_map[sym], "qty", 0) or 0)), "close")
+            for sym in earnings_forced_syms
+        ]
+
+    buy_carry = [b for b in plan.get("buy", []) if b["symbol"] not in earnings_forced_syms]
+    plan_target_snapshot = plan.get("target_snapshot")
+    if plan_target_snapshot is not None:
+        target_snapshot = {
+            sym: data for sym, data in plan_target_snapshot.items()
+            if sym not in earnings_forced_syms
+        }
+        reallocation_required = len(target_snapshot) != len(plan_target_snapshot)
+    else:
+        target_snapshot = None
+        reallocation_required = False
 
     if not dry_run:
         cancel_stop_orders_for_symbols(client, [sym for sym, _, _ in sell_targets])
@@ -1427,19 +1577,34 @@ def execute_sell_phase(client: TradingClient, state: dict, run_id: str, dry_run:
         orders_out.append({"symbol": sym, "qty": qty, "client_order_id": order_req.client_order_id, "kind": kind})
 
     summary["orders"]        = orders_out
-    summary["buy_carry"]     = plan.get("buy", [])
+    summary["buy_carry"]     = buy_carry
     summary["all_failed"]    = bool(sell_targets) and not orders_out
     summary["submit_failed"] = submit_failed
+    summary["earnings_forced_close"] = sorted(earnings_forced_syms)
+    summary["earnings_recheck_degraded"] = earnings_recheck_degraded
+    summary["earnings_recheck_failed_symbols"] = sorted(earnings_recheck_failed_symbols)
 
     if not dry_run:
         if summary["all_failed"]:
             log.error("  ❌ 卖出阶段全部提交失败，保留 cycle_plan 以便下次重试，不推进周期")
         else:
+            plan_target_n = plan.get("target_n")
+            pending_target_n = (
+                len(target_snapshot)
+                if target_snapshot is not None
+                else max(plan_target_n - len(earnings_forced_syms), 0)
+                if plan_target_n is not None
+                else None
+            )
             state[PENDING_SELL_KEY] = {
                 "sell_date": str(today),
                 "signal_date": plan["signal_date"],
                 "orders": orders_out,
-                "buy_carry": plan.get("buy", []),
+                "buy_carry": buy_carry,
+                "target_n": pending_target_n,
+                "earnings_forced_close": sorted(earnings_forced_syms),
+                "target_snapshot": target_snapshot,
+                "reallocation_required": reallocation_required,
             }
             if submit_failed:
                 # 部分标的提交失败但另一部分成功：不能整体判定 all_failed，也不能让失败标的
@@ -1465,13 +1630,18 @@ def execute_sell_phase(client: TradingClient, state: dict, run_id: str, dry_run:
 
 
 def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: bool,
-                       audit: Optional[AuditWriter] = None) -> dict:
+                       audit: Optional[AuditWriter] = None,
+                       sizing_capital: Optional[float] = None,
+                       earnings_allow: Optional[set] = None) -> dict:
     """
     phase=buy（T+2 开盘前运行）：逐笔核实 pending_sell 中卖单的实际成交情况，
     再用账户当下真实可用资金提交买单（资金不足则按比例缩减，保留最小 1 股）。
     """
     pending = state.get(PENDING_SELL_KEY)
-    summary = {"had_pending": bool(pending), "fill_issues": [], "orders": [], "scaled": False, "note": ""}
+    summary = {
+        "had_pending": bool(pending), "fill_issues": [], "orders": [],
+        "scaled": False, "buy_pending": False, "note": "",
+    }
     if not pending:
         log.info("  pending_sell 为空，今日无待买入计划。")
         return summary
@@ -1514,12 +1684,135 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
     # ── 用真实可用资金提交买单 ───────────────────────────────────────────────
     account = client.get_account()
     real_buying_power = float(account.buying_power)
+    positions = client.get_all_positions()
+    position_qty_map = {p.symbol: int(float(getattr(p, "qty", 0) or 0)) for p in positions}
+    position_market_value_map = {
+        p.symbol: float(getattr(p, "market_value", 0) or 0)
+        for p in positions
+    }
+    held_symbols = set(position_qty_map.keys())
     buy_carry = pending.get("buy_carry", [])
+    pending_target_snapshot = pending.get("target_snapshot")
     if bad_symbols:
         skipped_syms = [b["symbol"] for b in buy_carry if b["symbol"] in bad_symbols]
         if skipped_syms:
             log.warning(f"  ⚠️ 以下标的卖单未确认成交，本轮暂停对应买入决策: {skipped_syms}")
         buy_carry = [b for b in buy_carry if b["symbol"] not in bad_symbols]
+
+    # ── 财报避雷复核：pending_sell 里的 buy_carry 是 sell 阶段（甚至更早的 plan 阶段）
+    # 冻结的旧计划，买入前再查一次财报日历，命中的标的直接取消本次买入（不发起卖出——
+    # 已持仓部分的清仓交给下一轮 sell 阶段的复核逻辑）。
+    new_blackout: set = set()
+    buy_recheck_degraded = False
+    buy_recheck_failed_symbols: set = set()
+    if pending_target_snapshot is not None:
+        earnings_check_syms = list(pending_target_snapshot.keys())
+    else:
+        earnings_check_syms = [b["symbol"] for b in buy_carry]
+    if EARNINGS_BLACKOUT_DAYS > 0 and earnings_check_syms:
+        check_syms = [sym for sym in earnings_check_syms if sym not in ("QQQ", "SPY")]
+        new_blackout, buy_recheck_degraded, buy_recheck_failed_symbols = lookup_upcoming_earnings(
+            check_syms, EARNINGS_BLACKOUT_DAYS
+        )
+        new_blackout &= set(check_syms)
+        if earnings_allow:
+            overridden = new_blackout & earnings_allow
+            if overridden:
+                log.warning(f"  ⚠️ buy 阶段手动豁免财报避雷：{sorted(overridden)}")
+                new_blackout -= earnings_allow
+        if new_blackout:
+            log.warning(f"  📅 buy 阶段财报复核命中：{sorted(new_blackout)}，取消本次买入")
+            summary["earnings_skipped"] = sorted(new_blackout)
+            buy_carry = [b for b in buy_carry if b["symbol"] not in new_blackout]
+    summary["earnings_recheck_degraded"] = buy_recheck_degraded
+    summary["earnings_recheck_failed_symbols"] = sorted(buy_recheck_failed_symbols)
+
+    # ── 财报剔除导致候选数变化：按剩余候选重新计算等权目标金额，而不是留着过时份额 ──
+    target_n_sell = pending.get("target_n")
+    summary["earnings_reallocated"] = False
+    if pending_target_snapshot is not None:
+        final_target_snapshot = {
+            sym: data for sym, data in pending_target_snapshot.items()
+            if sym not in new_blackout
+        }
+        full_reallocation_required = bool(pending.get("reallocation_required")) or bool(new_blackout)
+    else:
+        final_target_snapshot = None
+        full_reallocation_required = False
+
+    if full_reallocation_required:
+        if sizing_capital is None:
+            log.warning(
+                "  ⚠️ 财报剔除后本应基于完整目标快照重新分配，但 sizing_capital 缺失，"
+                "本轮仅过滤不重算（可能资金利用不充分）"
+            )
+        else:
+            target_n_final = len(final_target_snapshot)
+            excluded_symbols = set(pending.get("earnings_forced_close", [])) | new_blackout
+            excluded_held_value = sum(position_market_value_map.get(sym, 0.0) for sym in excluded_symbols)
+            summary["excluded_held_value"] = round(excluded_held_value, 2)
+            investable = max(
+                sizing_capital * (1 - MIN_CASH_BUFFER_PCT) - excluded_held_value,
+                0.0,
+            )
+            new_target_val = min(investable / target_n_final, sizing_capital * MAX_POSITION_PCT) if target_n_final > 0 else 0.0
+            resized = []
+            for sym, target_data in final_target_snapshot.items():
+                if sym in bad_symbols:
+                    continue
+                price = float(target_data.get("price", 0) or 0)
+                cur_qty = position_qty_map.get(sym, 0)
+                new_qty = int(new_target_val / (price * 1.05)) if price > 0 else 0
+                new_delta = new_qty - cur_qty
+                if new_delta <= 0:
+                    log.info(f"  {sym} 重新分配后已达/超目标仓位，本轮取消买入")
+                    summary.setdefault("earnings_reallocation_dropped", []).append(sym)
+                    continue
+                new_drift = (cur_qty * price - new_target_val) / new_target_val if new_target_val > 0 else 0.0
+                resized.append({
+                    "symbol": sym,
+                    "qty": new_delta,
+                    "price": price,
+                    "is_new": cur_qty == 0,
+                    "drift": round(new_drift, 6),
+                })
+            buy_carry = resized
+            summary["earnings_reallocated"] = True
+            summary["target_val_reallocated"] = round(new_target_val, 2)
+            log.info(
+                f"  📅 财报剔除后候选数 {len(pending_target_snapshot)}→{target_n_final}，"
+                f"基于完整目标快照重算等权目标金额=${new_target_val:,.0f}"
+            )
+    elif new_blackout and buy_carry:
+        if target_n_sell is None or sizing_capital is None:
+            log.warning(
+                "  ⚠️ 财报剔除后本应重新分配买入金额，但 target_n/sizing_capital 缺失，"
+                "本轮仅过滤不重算（可能资金利用不充分）"
+            )
+        else:
+            target_n_final = max(target_n_sell - len(new_blackout), 0)
+            investable = sizing_capital * (1 - MIN_CASH_BUFFER_PCT)
+            new_target_val = min(investable / target_n_final, sizing_capital * MAX_POSITION_PCT) if target_n_final > 0 else 0.0
+            resized = []
+            for b in buy_carry:
+                sym, price = b["symbol"], b["price"]
+                cur_qty = position_qty_map.get(sym, 0)
+                new_qty = int(new_target_val / (price * 1.05)) if price > 0 else 0
+                new_delta = new_qty - cur_qty
+                if new_delta <= 0:
+                    log.info(f"  {sym} 重新分配后已达/超目标仓位，本轮取消买入")
+                    summary.setdefault("earnings_reallocation_dropped", []).append(sym)
+                    continue
+                new_drift = (cur_qty * price - new_target_val) / new_target_val if new_target_val > 0 else 0.0
+                resized.append({**b, "qty": new_delta, "drift": round(new_drift, 6)})
+            buy_carry = resized
+            summary["earnings_reallocated"] = True
+            summary["target_val_reallocated"] = round(new_target_val, 2)
+            log.info(
+                f"  📅 财报剔除后候选数 {target_n_sell}→{target_n_final}，"
+                f"重算等权目标金额=${new_target_val:,.0f}"
+            )
+
     est_buy_total = sum(b["qty"] * b["price"] for b in buy_carry)
 
     scale = 1.0
@@ -1532,12 +1825,20 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
         )
 
     orders_out = []
+    pending_buy_orders = []
+    buy_submit_failed = []
     for b in buy_carry:
         qty = int(b["qty"] * scale) if scale < 1.0 else b["qty"]
         if qty <= 0:
             log.warning(f"  ⚠️ {b['symbol']} 缩减后数量为 0（资金不足），本轮跳过该标的买入")
             continue
         sym, price, is_new, drift = b["symbol"], b["price"], b.get("is_new", True), b.get("drift", 0.0)
+        if is_new and sym in held_symbols:
+            # buy_carry 的 is_new 是计划生成时算的，若计划卡了多轮才被消费，中途可能已经
+            # 通过其他渠道建过仓——提交前用当下真实持仓再核实一次，防止同一标的重复建仓
+            log.warning(f"  ⚠️ {sym} 计划为新建仓位，但当前已有持仓，跳过本次买入以防重复建仓")
+            summary["fill_issues"].append(f"{sym} 跳过买入：计划新建但已有持仓")
+            continue
         action_tag   = "enter" if is_new else "add"
         order_req    = build_market_order(sym, qty, OrderSide.BUY, pending["signal_date"], action_tag)
         action_label = "新建" if is_new else f"加仓 drift={drift:+.1%}"
@@ -1552,6 +1853,12 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
         }
         if audit:
             audit.append_order(row)
+        pending_item = {
+            "symbol": sym,
+            "qty": qty,
+            "client_order_id": order_req.client_order_id,
+            "status": "submitted",
+        }
         if not dry_run:
             try:
                 client.submit_order(order_req)
@@ -1562,16 +1869,26 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
                 elif any(kw in err_msg for kw in ("halt", "not_tradable", "suspended", "asset_not_tradable")):
                     log.warning(f"    ⚠️ {sym} 停牌/LULD 熔断，写入重试队列")
                     _append_halt_pending(sym, qty, pending["signal_date"], run_id)
+                    failed_item = {**pending_item, "status": "halted", "message": str(e)}
+                    pending_buy_orders.append(failed_item)
+                    buy_submit_failed.append(failed_item)
                 else:
                     log.error(f"    ❌ 买入失败 {sym}: {e}")
+                    failed_item = {**pending_item, "status": "submit_failed", "message": str(e)}
+                    pending_buy_orders.append(failed_item)
+                    buy_submit_failed.append(failed_item)
                 continue
-        orders_out.append({"symbol": sym, "qty": qty})
+        orders_out.append(pending_item)
+        if not dry_run:
+            pending_buy_orders.append(pending_item)
 
     summary["orders"] = orders_out
+    summary["submit_failed"] = buy_submit_failed
 
-    # ── 买入提交后立即补挂止损单，避免新仓位在下次 plan 阶段前无保护 ────────────
+    # 实盘买单返回 accepted 只代表券商接单，不能假设已经成交。止损单必须等后续
+    # reconcile_pending_buy() 核实成交并读取真实持仓后再补挂。
     stop_orders_submitted = 0
-    if orders_out or dry_run:
+    if dry_run:
         try:
             fresh_positions = client.get_all_positions()
             stop_orders_submitted = ensure_stop_orders_for_positions(
@@ -1582,9 +1899,17 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
     summary["stop_orders_submitted"] = stop_orders_submitted
 
     if not dry_run:
-        state["last_rebalance"] = str(today)
         state["last_order_signal_date"] = pending["signal_date"]
         state.pop(PENDING_SELL_KEY, None)
+        if pending_buy_orders:
+            state[PENDING_BUY_KEY] = {
+                "submit_date": str(today),
+                "signal_date": pending["signal_date"],
+                "orders": pending_buy_orders,
+            }
+            summary["buy_pending"] = True
+        else:
+            state["last_rebalance"] = str(today)
         if unresolved_sells:
             # 未确认成交的卖单不能就此放弃：写回一份新的 cycle_plan，close_all/trim 里只放
             # 未成交剩余量，对应的买入决策一并带上，下一轮 sell 阶段会自动重试卖出，
@@ -1623,6 +1948,112 @@ def execute_buy_phase(client: TradingClient, state: dict, run_id: str, dry_run: 
                 f"  ⚠️ {len(unresolved_sells)} 笔卖单未确认成交，已写回 cycle_plan 供下一轮重试："
                 f"close={[s['symbol'] for s in retry_close]} trim={[s['symbol'] for s in retry_trim]}"
             )
+    return summary
+
+
+def reconcile_pending_buy(client: TradingClient, state: dict, run_id: str,
+                          dry_run: bool, audit: Optional[AuditWriter] = None) -> dict:
+    """核实 buy 阶段已提交订单；全部成交后才补挂止损并完成调仓周期。"""
+    pending = state.get(PENDING_BUY_KEY)
+    summary = {
+        "had_pending": bool(pending),
+        "completed": False,
+        "fill_issues": [],
+        "stop_orders_submitted": 0,
+    }
+    if not pending:
+        log.info("  pending_buy 为空，无需核实买单。")
+        return summary
+
+    remaining_orders = []
+    for item in pending.get("orders", []):
+        sym = item["symbol"]
+        qty = int(item["qty"])
+        cid = item["client_order_id"]
+        try:
+            order = client.get_order_by_client_id(cid)
+            filled_qty = float(getattr(order, "filled_qty", 0) or 0)
+            raw_status = getattr(order, "status", "")
+            broker_status = getattr(raw_status, "value", str(raw_status)).lower()
+        except Exception as e:
+            err_msg = str(e).lower()
+            retry_attempt = int(item.get("retry_attempt", 0) or 0)
+            confirmed_not_found = "404" in err_msg or "not found" in err_msg
+            can_retry = (
+                item.get("status") == "submit_failed"
+                and confirmed_not_found
+                and retry_attempt < 1
+                and not dry_run
+            )
+            if can_retry:
+                next_attempt = retry_attempt + 1
+                retry_req = build_market_order(
+                    sym, qty, OrderSide.BUY, pending["signal_date"],
+                    f"buyretry{next_attempt}",
+                )
+                try:
+                    client.submit_order(retry_req)
+                    log.warning(
+                        f"  ⚠️ {sym} 原买单确认不存在，已受控重提 × {qty} "
+                        f"（client_order_id={retry_req.client_order_id}）"
+                    )
+                    remaining_orders.append({
+                        **item,
+                        "client_order_id": retry_req.client_order_id,
+                        "status": "submitted",
+                        "retry_attempt": next_attempt,
+                    })
+                except Exception as retry_error:
+                    issue = f"{sym} 买单受控重提失败: {retry_error}"
+                    log.error(f"  ❌ {issue}")
+                    summary["fill_issues"].append(issue)
+                    remaining_orders.append({
+                        **item,
+                        "status": "retry_failed",
+                        "retry_attempt": next_attempt,
+                        "message": str(retry_error),
+                    })
+                continue
+            issue = f"{sym} 买单成交状态查询失败: {e}"
+            log.warning(f"  ⚠️ {issue}")
+            summary["fill_issues"].append(issue)
+            remaining_orders.append({**item, "status": "query_error", "message": str(e)})
+            continue
+
+        if filled_qty >= qty:
+            log.info(f"  ✅ {sym} 买单已完全成交（filled={filled_qty:g}/{qty}）")
+            continue
+
+        issue = f"{sym} 买单未完全成交（filled={filled_qty:g}/{qty}, status={broker_status}）"
+        log.warning(f"  ⚠️ {issue}")
+        summary["fill_issues"].append(issue)
+        remaining_orders.append({
+            **item,
+            "status": broker_status or "unknown",
+            "filled_qty": filled_qty,
+        })
+
+    if remaining_orders:
+        if not dry_run:
+            state[PENDING_BUY_KEY] = {**pending, "orders": remaining_orders}
+        return summary
+
+    try:
+        fresh_positions = client.get_all_positions()
+        summary["stop_orders_submitted"] = ensure_stop_orders_for_positions(
+            client, fresh_positions, pending["signal_date"], dry_run
+        )
+    except Exception as e:
+        issue = f"买单成交后补挂止损失败: {e}"
+        log.warning(f"  ⚠️ {issue}")
+        summary["fill_issues"].append(issue)
+        return summary
+
+    summary["completed"] = True
+    if not dry_run:
+        state.pop(PENDING_BUY_KEY, None)
+        state["last_rebalance"] = str(date.today())
+        state["last_order_signal_date"] = pending["signal_date"]
     return summary
 
 
@@ -1665,7 +2096,9 @@ def rebalance(
     # 财报避雷：未来 EARNINGS_BLACKOUT_DAYS 天内有财报的股票强制回避
     if EARNINGS_BLACKOUT_DAYS > 0:
         check_syms = list((target_set | set(current_map.keys())) - {"QQQ", "SPY"})
-        earnings_blackout, earnings_degraded = get_upcoming_earnings(check_syms, EARNINGS_BLACKOUT_DAYS)
+        earnings_blackout, earnings_degraded, _ = lookup_upcoming_earnings(
+            check_syms, EARNINGS_BLACKOUT_DAYS
+        )
         if earnings_allow:
             overridden = earnings_blackout & earnings_allow
             if overridden:
@@ -1678,7 +2111,8 @@ def rebalance(
         earnings_blackout: set[str] = set()
 
     # ── 等权目标金额 ─────────────────────────────────────────────────────────────
-    target_val = equity / len(target_set) if target_set else 0.0
+    investable = equity * (1 - MIN_CASH_BUFFER_PCT)
+    target_val = min(investable / len(target_set), equity * MAX_POSITION_PCT) if target_set else 0.0
 
     # ── 预计算全部操作计划（先算完再下单，方便资金预估） ─────────────────────────
     close_all_list   = []           # [(sym, market_value)]  全仓清出
@@ -1879,7 +2313,7 @@ def main():
     parser.add_argument("--allow-duplicate", action="store_true",
                         help="允许同一 signal_date 重复提交订单（默认禁止）")
     parser.add_argument("--retry-halted", action="store_true",
-                        help="重试因 LULD 熔断被拒的挂单（由单独 cron 在 9:45 AM ET 触发）")
+                        help="核实 pending_buy 并重试 LULD 挂单（由单独 cron 在 9:45 AM ET 触发）")
     parser.add_argument("--earnings-allow", type=str, default="",
                         help="逗号分隔股票代码，本次运行手动豁免财报避雷强制出场（如 MU,AAPL）。"
                              "仅本次生效，需人工确认财报预期正面后使用，风险自负。")
@@ -1910,7 +2344,17 @@ def main():
 
 def _main_impl(args, earnings_allow):
     if args.retry_halted:
-        retry_halted_orders(dry_run=args.dry_run)
+        state = _load_state()
+        if state.get(PENDING_BUY_KEY):
+            try:
+                client = TradingClient(API_KEY, SECRET_KEY, paper=PAPER)
+                run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+                reconcile_pending_buy(client, state, run_id, dry_run=args.dry_run)
+            except Exception as e:
+                log.error(f"pending_buy 核实失败，本轮保留状态并继续 LULD 重试: {e}")
+        retry_halted_orders(dry_run=args.dry_run, state=state)
+        if not args.dry_run:
+            _save_state(state)
         return
 
     run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
@@ -1982,6 +2426,12 @@ def _main_impl(args, earnings_allow):
                  f"可用资金: ${buying_power:>12,.2f}")
         existing_positions = client.get_all_positions()
 
+        # sizing_capital 提前到这里计算：phase=sell/buy 在下面会提前 return，
+        # 需要在那之前就可用（buy 阶段财报剔除后重新分配买入金额要用到）。
+        sizing_capital = SIM_CAPITAL_USD if SIM_CAPITAL_USD > 0 else equity
+        if SIM_CAPITAL_USD > 0:
+            log.info(f"  💰 仓位规模模拟：按 ${SIM_CAPITAL_USD:,.0f} 计算买入数量（账户真实净值 ${equity:,.2f} 仅用于回撤/Kill Switch 判断）")
+
     # ── Kill Switch 检查 ─────────────────────────────────────────────────────
         hw = float(state["high_watermark"]) if state["high_watermark"] else equity
         if equity > hw:
@@ -2021,7 +2471,9 @@ def _main_impl(args, earnings_allow):
 
     # ── phase=sell / phase=buy：独立于 plan/both 的调仓周期主流程 ─────────────
         if args.phase == "sell":
-            summary = execute_sell_phase(client, state, run_id, args.dry_run, audit)
+            summary = execute_sell_phase(
+                client, state, run_id, args.dry_run, audit, earnings_allow
+            )
             _save_state(state)
             if not summary["had_plan"]:
                 status = "no_pending_plan"
@@ -2049,6 +2501,7 @@ def _main_impl(args, earnings_allow):
                     f"- run_id: {run_id}",
                     "- ⚠️ 本轮 cycle_plan 中的卖单全部提交失败，已保留 cycle_plan 供下次 sell 重试，未推进周期",
                     "- 请人工检查 API 连接/账户状态/标的是否可交易",
+                    *sell_earnings_email_lines(summary),
                 ])]
             else:
                 had_submit_failures = bool(summary.get("submit_failed"))
@@ -2063,6 +2516,7 @@ def _main_impl(args, earnings_allow):
                     "## 今日结论：尾盘前卖出已提交" + ("（部分标的提交失败，需人工复核）" if had_submit_failures else ""),
                     f"- run_id: {run_id}",
                     f"- 提示: {summary['note']}" if summary["note"] else "",
+                    *sell_earnings_email_lines(summary),
                     "",
                     "## 已提交卖单",
                     *order_lines,
@@ -2075,7 +2529,9 @@ def _main_impl(args, earnings_allow):
             return
 
         if args.phase == "buy":
-            summary = execute_buy_phase(client, state, run_id, args.dry_run, audit)
+            summary = execute_buy_phase(
+                client, state, run_id, args.dry_run, audit, sizing_capital, earnings_allow
+            )
             _save_state(state)
             if not summary["had_pending"]:
                 status = "no_pending_plan"
@@ -2089,21 +2545,39 @@ def _main_impl(args, earnings_allow):
                     "pending_sell_summary": "无",
                 })]
             else:
-                status = "buy_completed_with_issues" if summary.get("had_fill_issues") else "buy_completed"
+                status = buy_phase_status(summary)
+                buy_pending = bool(summary.get("buy_pending"))
                 order_lines = [f"- {o['symbol']} × {o['qty']}" for o in summary["orders"]] or ["- 无实际提交"]
                 issue_lines = summary["fill_issues"] or ["- 无异常，全部卖单如期成交"]
+                failed_buy_lines = [
+                    f"- {o['symbol']} × {o['qty']}（{o['status']}，已保留 pending_buy）"
+                    for o in summary.get("submit_failed", [])
+                ]
                 email_lines = ["\n".join([
-                    "## 今日结论：调仓周期完成" + ("（存在卖单未确认成交，需人工复核）" if summary.get("had_fill_issues") else ""),
+                    (
+                        "## 今日结论：买单已提交，等待 09:45 ET 成交核实"
+                        if buy_pending
+                        else "## 今日结论：调仓周期完成"
+                    ) + ("（存在异常，需人工复核）" if status.endswith("with_issues") else ""),
                     f"- run_id: {run_id}",
                     f"- 提示: {summary['note']}" if summary["note"] else "",
                     f"- 买入资金是否缩减: {'是' if summary['scaled'] else '否'}",
-                    f"- 买入后新挂止损单: {summary.get('stop_orders_submitted', 0)} 笔",
+                    (
+                        "- 止损单: 待买单确认成交后按真实持仓补挂"
+                        if buy_pending
+                        else f"- 买入后新挂止损单: {summary.get('stop_orders_submitted', 0)} 笔"
+                    ),
+                    f"- 📅 财报复核取消买入: {summary['earnings_skipped']}" if summary.get("earnings_skipped") else "",
+                    f"- 📅 已按剩余候选重新计算等权买入金额: ${summary['target_val_reallocated']:,.0f}" if summary.get("earnings_reallocated") else "",
+                    f"- ⚠️ 财报日历查询失败并默认放行: {summary['earnings_recheck_failed_symbols']}" if summary.get("earnings_recheck_failed_symbols") else "",
+                    "- ⚠️ 财报日历查询降级（本轮未能完整复核，请留意后续手动核查）" if summary.get("earnings_recheck_degraded") else "",
                     "",
                     "## 卖单成交核实",
                     *issue_lines,
                     "",
-                    "## 已提交买单（未确认成交标的本轮已跳过买入）",
+                    "## 已提交买单（等待成交核实）" if buy_pending else "## 已确认完成的买入计划",
                     *order_lines,
+                    *(["", "## 买单提交异常"] + failed_buy_lines if failed_buy_lines else []),
                     *(["", "⚠️ 待合并的 cycle_plan 与 pending_sell signal_date 不一致，两个周期被意外混合，请人工核查 state.json"]
                       if summary.get("signal_date_mixed") else []),
                 ])]
@@ -2111,7 +2585,7 @@ def _main_impl(args, earnings_allow):
             return
 
     # ── phase=plan：上一周期未完成则不重新计算 ────────────────────────────────
-        if args.phase == "plan" and (state.get(CYCLE_PLAN_KEY) or state.get(PENDING_SELL_KEY)):
+        if args.phase == "plan" and has_incomplete_cycle(state):
             log.warning("⚠️ 上一周期尚未完成 buy，本次不重新计算调仓计划")
             status = "cycle_already_pending"
             _save_state(state)
@@ -2123,7 +2597,7 @@ def _main_impl(args, earnings_allow):
                 "last_rebalance": state.get("last_rebalance"),
                 "cycle_plan_summary": json.dumps(state.get(CYCLE_PLAN_KEY), ensure_ascii=False) if state.get(CYCLE_PLAN_KEY) else "无",
                 "pending_sell_summary": json.dumps(state.get(PENDING_SELL_KEY), ensure_ascii=False) if state.get(PENDING_SELL_KEY) else "无",
-                "warning": "cycle_plan 或 pending_sell 卡住未清空，请人工检查 state.json 并确认上一轮 buy 是否已手动完成。",
+                "warning": "cycle_plan、pending_sell 或 pending_buy 尚未清空，请人工检查 state.json 并确认上一轮周期状态。",
             })]
             return
 
@@ -2190,9 +2664,6 @@ def _main_impl(args, earnings_allow):
         run_summary["stop_orders_submitted"] = str(stop_orders_submitted)
 
         # ── 执行调仓 ─────────────────────────────────────────────────────────────
-        sizing_capital = SIM_CAPITAL_USD if SIM_CAPITAL_USD > 0 else equity
-        if SIM_CAPITAL_USD > 0:
-            log.info(f"  💰 仓位规模模拟：按 ${SIM_CAPITAL_USD:,.0f} 计算买入数量（账户真实净值 ${equity:,.2f} 仅用于回撤/Kill Switch 判断）")
         log.info(f"\n目标持仓 ({regime_str}, Top-{len(target_syms)}): {target_syms}")
         if earnings_allow:
             log.info(f"  ⚠️ 本次手动豁免财报避雷名单：{sorted(earnings_allow)}")
@@ -2219,6 +2690,8 @@ def _main_impl(args, earnings_allow):
                 f"买入需求≈{_money(plan['est_buy_total'])}  可用≈{_money(plan['est_available'])}",
                 "⚠️ 财报避雷本次可能未完全生效（超过一半标的财报日历查询失败/超时），请人工核实相关持仓财报日期"
                 if plan.get("earnings_degraded") else "",
+                f"⚠️ 财报日历查询失败并默认放行: {plan['earnings_failed_symbols']}"
+                if plan.get("earnings_failed_symbols") else "",
                 "",
                 "## 目标持仓",
                 f"- {target_syms}",

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
@@ -418,7 +418,8 @@ class ExecutionSafetyTests(unittest.TestCase):
             }
         }
 
-        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient):
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
             summary = trader.execute_sell_phase(Client(), state, "run-sell-fail", dry_run=False)
 
         self.assertTrue(summary["all_failed"])
@@ -450,7 +451,8 @@ class ExecutionSafetyTests(unittest.TestCase):
             }
         }
 
-        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient):
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
             summary = trader.execute_sell_phase(Client(), state, "run-sell-ok", dry_run=False)
 
         self.assertFalse(summary["all_failed"])
@@ -501,7 +503,8 @@ class ExecutionSafetyTests(unittest.TestCase):
         }
 
         client = Client()
-        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient):
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
             summary = trader.execute_sell_phase(client, state, "run-sell-stop", dry_run=False)
 
         self.assertEqual(client.cancelled, ["stop-amat-1"])
@@ -550,7 +553,8 @@ class ExecutionSafetyTests(unittest.TestCase):
             }
         }
 
-        summary = trader.execute_buy_phase(Client(), state, "run-buy-retry", dry_run=False)
+        with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
+            summary = trader.execute_buy_phase(Client(), state, "run-buy-retry", dry_run=False)
 
         self.assertTrue(summary.get("retry_plan_written"))
         self.assertNotIn(trader.PENDING_SELL_KEY, state)
@@ -611,7 +615,8 @@ class ExecutionSafetyTests(unittest.TestCase):
             },
         }
 
-        summary = trader.execute_buy_phase(Client(), state, "run-buy-merge", dry_run=False)
+        with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
+            summary = trader.execute_buy_phase(Client(), state, "run-buy-merge", dry_run=False)
 
         self.assertTrue(summary.get("retry_plan_written"))
         retry_plan = state[trader.CYCLE_PLAN_KEY]
@@ -664,7 +669,8 @@ class ExecutionSafetyTests(unittest.TestCase):
             },
         }
 
-        summary = trader.execute_buy_phase(Client(), state, "run-buy-dedup", dry_run=False)
+        with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
+            summary = trader.execute_buy_phase(Client(), state, "run-buy-dedup", dry_run=False)
 
         self.assertTrue(summary.get("retry_plan_written"))
         retry_plan = state[trader.CYCLE_PLAN_KEY]
@@ -717,7 +723,8 @@ class ExecutionSafetyTests(unittest.TestCase):
             },
         }
 
-        summary = trader.execute_buy_phase(Client(), state, "run-buy-mixed", dry_run=False)
+        with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
+            summary = trader.execute_buy_phase(Client(), state, "run-buy-mixed", dry_run=False)
 
         self.assertTrue(summary.get("signal_date_mixed"))
 
@@ -793,7 +800,8 @@ class ExecutionSafetyTests(unittest.TestCase):
         state = {trader.CYCLE_PLAN_KEY: retry_plan}
 
         client = Client()
-        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient):
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
             summary = trader.execute_sell_phase(client, state, "run-sell-retry", dry_run=False)
 
         self.assertEqual(len(client.submitted), 1)
@@ -823,6 +831,9 @@ class ExecutionSafetyTests(unittest.TestCase):
             def get_account(self):
                 return Account()
 
+            def get_all_positions(self):
+                return []
+
             def submit_order(self, req):
                 self.submitted.append(req)
                 return type("Order", (), {"id": "buy-1", "status": "accepted"})()
@@ -842,7 +853,8 @@ class ExecutionSafetyTests(unittest.TestCase):
         }
 
         client = Client()
-        summary = trader.execute_buy_phase(client, state, "run-buy-issue", dry_run=False)
+        with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
+            summary = trader.execute_buy_phase(client, state, "run-buy-issue", dry_run=False)
 
         self.assertTrue(summary["had_fill_issues"])
         self.assertEqual(len(summary["fill_issues"]), 1)
@@ -870,6 +882,7 @@ class ExecutionSafetyTests(unittest.TestCase):
         class Client:
             def __init__(self):
                 self.stop_orders = []
+                self.bought = False
 
             def get_order_by_client_id(self, cid):
                 return type("Order", (), {"filled_qty": 3, "status": "filled"})()
@@ -883,10 +896,12 @@ class ExecutionSafetyTests(unittest.TestCase):
             def submit_order(self, req):
                 if getattr(req, "stop_price", None) is not None:
                     self.stop_orders.append(req)
+                else:
+                    self.bought = True
                 return type("Order", (), {"id": "o-1", "status": "accepted"})()
 
             def get_all_positions(self):
-                return [Position()]
+                return [Position()] if self.bought else []
 
         state = {
             trader.PENDING_SELL_KEY: {
@@ -902,10 +917,321 @@ class ExecutionSafetyTests(unittest.TestCase):
         }
 
         client = Client()
-        summary = trader.execute_buy_phase(client, state, "run-buy-stop", dry_run=False)
+        with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
+            summary = trader.execute_buy_phase(client, state, "run-buy-stop", dry_run=False)
 
-        self.assertEqual(summary["stop_orders_submitted"], 1)
+        self.assertEqual(summary["stop_orders_submitted"], 0)
+        self.assertIn(trader.PENDING_BUY_KEY, state)
+
+        reconcile_summary = trader.reconcile_pending_buy(
+            client, state, "run-buy-stop-reconcile", dry_run=False,
+        )
+
+        self.assertTrue(reconcile_summary["completed"])
+        self.assertEqual(reconcile_summary["stop_orders_submitted"], 1)
         self.assertEqual(len(client.stop_orders), 1)
+
+    def test_buy_phase_accepted_order_transitions_to_pending_buy(self):
+        """券商 accepted 只表示接单，不代表成交。buy 阶段必须保存核实指针，且在
+        后续确认成交前不能更新 last_rebalance 或按旧持仓提前挂止损。"""
+        trader = load_trader_module()
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def get_account(self):
+                return Account()
+
+            def get_all_positions(self):
+                return []
+
+            def submit_order(self, req):
+                return type("Order", (), {"id": "buy-accepted", "status": "accepted"})()
+
+        state = {
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-07-09",
+                "signal_date": "2026-07-08",
+                "orders": [],
+                "buy_carry": [
+                    {"symbol": "NVDA", "qty": 2, "price": 50.0, "is_new": True, "drift": 0.0},
+                ],
+            }
+        }
+
+        with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0), \
+             patch.object(trader, "ensure_stop_orders_for_positions", return_value=0) as stop_mock:
+            summary = trader.execute_buy_phase(Client(), state, "run-buy-pending", dry_run=False)
+
+        self.assertTrue(summary["buy_pending"])
+        self.assertNotIn(trader.PENDING_SELL_KEY, state)
+        self.assertIn(trader.PENDING_BUY_KEY, state)
+        self.assertNotIn("last_rebalance", state)
+        pending = state[trader.PENDING_BUY_KEY]
+        self.assertEqual(pending["orders"][0]["symbol"], "NVDA")
+        self.assertEqual(pending["orders"][0]["qty"], 2)
+        stop_mock.assert_not_called()
+
+    def test_reconcile_pending_buy_completes_only_after_fill_and_attaches_stops(self):
+        trader = load_trader_module()
+
+        class Position:
+            symbol = "NVDA"
+            qty = "2"
+            avg_entry_price = "50"
+
+        class Client:
+            def get_order_by_client_id(self, cid):
+                return type("Order", (), {"filled_qty": 2, "status": "filled"})()
+
+            def get_all_positions(self):
+                return [Position()]
+
+        state = {
+            trader.PENDING_BUY_KEY: {
+                "submit_date": "2026-07-10",
+                "signal_date": "2026-07-08",
+                "orders": [{
+                    "symbol": "NVDA", "qty": 2,
+                    "client_order_id": "tq-20260708-enter-nvda", "status": "submitted",
+                }],
+            }
+        }
+
+        with patch.object(trader, "ensure_stop_orders_for_positions", return_value=1) as stop_mock:
+            summary = trader.reconcile_pending_buy(Client(), state, "run-reconcile-filled", dry_run=False)
+
+        self.assertTrue(summary["completed"])
+        self.assertNotIn(trader.PENDING_BUY_KEY, state)
+        self.assertEqual(state["last_order_signal_date"], "2026-07-08")
+        self.assertIn("last_rebalance", state)
+        self.assertEqual(summary["stop_orders_submitted"], 1)
+        stop_mock.assert_called_once()
+
+    def test_reconcile_pending_buy_retains_nonfilled_and_unknown_orders(self):
+        trader = load_trader_module()
+
+        cases = [
+            ("partial", type("Order", (), {"filled_qty": 1, "status": "partially_filled"})()),
+            ("accepted", type("Order", (), {"filled_qty": 0, "status": "accepted"})()),
+            ("rejected", type("Order", (), {"filled_qty": 0, "status": "rejected"})()),
+            ("query_error", RuntimeError("temporary api error")),
+        ]
+
+        for label, result in cases:
+            with self.subTest(label=label):
+                class Client:
+                    def get_order_by_client_id(self, cid):
+                        if isinstance(result, Exception):
+                            raise result
+                        return result
+
+                    def get_all_positions(self):
+                        raise AssertionError("未全部成交时不应读取持仓挂止损")
+
+                state = {
+                    trader.PENDING_BUY_KEY: {
+                        "submit_date": "2026-07-10",
+                        "signal_date": "2026-07-08",
+                        "orders": [{
+                            "symbol": "NVDA", "qty": 2,
+                            "client_order_id": "tq-20260708-enter-nvda", "status": "submitted",
+                        }],
+                    }
+                }
+
+                with patch.object(trader, "ensure_stop_orders_for_positions", return_value=0) as stop_mock:
+                    summary = trader.reconcile_pending_buy(
+                        Client(), state, f"run-reconcile-{label}", dry_run=False,
+                    )
+
+                self.assertFalse(summary["completed"])
+                self.assertIn(trader.PENDING_BUY_KEY, state)
+                self.assertEqual(len(state[trader.PENDING_BUY_KEY]["orders"]), 1)
+                stop_mock.assert_not_called()
+
+    def test_buy_phase_submit_failure_keeps_pending_buy_intent(self):
+        trader = load_trader_module()
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def get_account(self):
+                return Account()
+
+            def get_all_positions(self):
+                return []
+
+            def submit_order(self, req):
+                raise RuntimeError("broker temporarily unavailable")
+
+        state = {
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-07-09",
+                "signal_date": "2026-07-08",
+                "orders": [],
+                "buy_carry": [
+                    {"symbol": "NVDA", "qty": 2, "price": 50.0, "is_new": True, "drift": 0.0},
+                ],
+            }
+        }
+
+        with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
+            summary = trader.execute_buy_phase(Client(), state, "run-buy-submit-failed", dry_run=False)
+
+        self.assertTrue(summary["buy_pending"])
+        self.assertNotIn("last_rebalance", state)
+        pending_order = state[trader.PENDING_BUY_KEY]["orders"][0]
+        self.assertEqual(pending_order["symbol"], "NVDA")
+        self.assertEqual(pending_order["qty"], 2)
+        self.assertEqual(pending_order["status"], "submit_failed")
+
+    def test_retry_halted_entry_reconciles_pending_buy_before_halt_queue(self):
+        trader = load_trader_module()
+        state = {
+            trader.PENDING_BUY_KEY: {
+                "submit_date": "2026-07-10",
+                "signal_date": "2026-07-08",
+                "orders": [],
+            }
+        }
+        args = type("Args", (), {"retry_halted": True, "dry_run": False})()
+        call_order = []
+
+        with patch.object(trader, "TradingClient", return_value=object()), \
+             patch.object(trader, "_load_state", return_value=state), \
+             patch.object(trader, "_save_state") as save_mock, \
+             patch.object(
+                 trader, "reconcile_pending_buy",
+                 side_effect=lambda *a, **k: call_order.append("reconcile") or {"completed": True},
+             ), \
+             patch.object(
+                 trader, "retry_halted_orders",
+                 side_effect=lambda *a, **k: call_order.append("halt_retry"),
+             ):
+            trader._main_impl(args, earnings_allow=set())
+
+        self.assertEqual(call_order, ["reconcile", "halt_retry"])
+        save_mock.assert_called_once_with(state)
+
+    def test_pending_buy_blocks_new_plan_and_has_noncompleted_status(self):
+        trader = load_trader_module()
+
+        self.assertTrue(trader.has_incomplete_cycle({trader.PENDING_BUY_KEY: {"orders": [{}]}}))
+        self.assertEqual(
+            trader.buy_phase_status({"buy_pending": True, "submit_failed": [], "had_fill_issues": False}),
+            "buy_submitted_pending_confirmation",
+        )
+        self.assertEqual(
+            trader.buy_phase_status({
+                "buy_pending": True,
+                "submit_failed": [{"symbol": "NVDA"}],
+                "had_fill_issues": False,
+            }),
+            "buy_submitted_with_issues",
+        )
+        self.assertEqual(
+            trader.buy_phase_status({"buy_pending": False, "submit_failed": [], "had_fill_issues": False}),
+            "buy_completed",
+        )
+
+    def test_reconcile_pending_buy_retries_submit_failure_only_after_confirmed_not_found(self):
+        trader = load_trader_module()
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def get_order_by_client_id(self, cid):
+                raise RuntimeError("404 order not found")
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "retry-1", "status": "accepted"})()
+
+            def get_all_positions(self):
+                raise AssertionError("重试单尚未确认成交，不应挂止损")
+
+        state = {
+            trader.PENDING_BUY_KEY: {
+                "submit_date": "2026-07-10",
+                "signal_date": "2026-07-08",
+                "orders": [{
+                    "symbol": "NVDA", "qty": 2,
+                    "client_order_id": "tq-20260708-enter-nvda",
+                    "status": "submit_failed",
+                }],
+            }
+        }
+        client = Client()
+
+        summary = trader.reconcile_pending_buy(
+            client, state, "run-reconcile-retry", dry_run=False,
+        )
+
+        self.assertFalse(summary["completed"])
+        self.assertEqual(len(client.submitted), 1)
+        pending_order = state[trader.PENDING_BUY_KEY]["orders"][0]
+        self.assertEqual(pending_order["status"], "submitted")
+        self.assertEqual(pending_order["retry_attempt"], 1)
+        self.assertNotEqual(pending_order["client_order_id"], "tq-20260708-enter-nvda")
+
+    def test_halt_retry_updates_pending_buy_client_order_id(self):
+        trader = load_trader_module()
+
+        class Quote:
+            bid_price = 100.0
+
+        class DataClient:
+            def get_stock_latest_quote(self, req):
+                return {"NVDA": Quote()}
+
+        class Client:
+            def get_order_by_client_id(self, cid):
+                raise RuntimeError("404 order not found")
+
+            def submit_order(self, req):
+                return type("Order", (), {"id": "halt-retry-1", "status": "accepted"})()
+
+            def get_all_positions(self):
+                raise AssertionError("halt 重试单尚未确认成交，不应挂止损")
+
+        state = {
+            trader.PENDING_BUY_KEY: {
+                "submit_date": "2026-07-10",
+                "signal_date": "2026-07-08",
+                "orders": [{
+                    "symbol": "NVDA", "qty": 2,
+                    "client_order_id": "tq-20260708-enter-nvda",
+                    "status": "halted",
+                }],
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pending_file = Path(tmp) / "halt_pending.json"
+            pending_file.write_text(json.dumps({
+                "pending_date": "2026-07-08",
+                "orders": [{
+                    "symbol": "NVDA", "qty": 2,
+                    "signal_date": "2026-07-08", "run_id": "run-buy-halt",
+                }],
+            }), encoding="utf-8")
+
+            with patch.object(trader, "HALT_PENDING_FILE", pending_file), \
+                 patch.object(trader, "TradingClient", return_value=Client()), \
+                 patch.object(trader, "StockHistoricalDataClient", return_value=DataClient()), \
+                 patch.object(trader, "_now_hour_et", return_value=10):
+                trader.reconcile_pending_buy(
+                    Client(), state, "run-reconcile-before-halt", dry_run=False,
+                )
+                trader.retry_halted_orders(dry_run=False, state=state)
+
+        pending_order = state[trader.PENDING_BUY_KEY]["orders"][0]
+        self.assertEqual(pending_order["status"], "submitted")
+        self.assertEqual(pending_order["client_order_id"], "tq-retry-20260708-nvda")
 
     def test_kill_switch_locked_force_closes_remaining_positions(self):
         trader = load_trader_module()
@@ -973,7 +1299,9 @@ class ExecutionSafetyTests(unittest.TestCase):
             def get_all_positions(self):
                 return []
 
-        with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
+        with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0), \
+             patch.object(trader, "MAX_POSITION_PCT", 0.5), \
+             patch.object(trader, "MIN_CASH_BUFFER_PCT", 0.05):
             plan = trader.compute_rebalance_plan(
                 Client(), ["AMAT", "NVDA"], close, equity=10000.0, buying_power=10000.0,
                 signal_date="2026-06-03",
@@ -982,6 +1310,499 @@ class ExecutionSafetyTests(unittest.TestCase):
         bought_syms = [b["symbol"] for b in plan["buy"]]
         self.assertIn("AMAT", bought_syms)
         self.assertNotIn("NVDA", bought_syms)
+        self.assertEqual(plan["target_snapshot"], {"AMAT": {"price": 102.0}})
+        self.assertEqual(plan["target_n"], 1)
+        self.assertEqual(plan["target_val"], 5000.0)
+
+    def test_compute_rebalance_plan_caps_single_candidate_at_max_position_pct(self):
+        trader = load_trader_module()
+        idx = pd.bdate_range("2026-06-01", periods=3)
+        close = pd.DataFrame({"AMAT": [100.0, 101.0, 102.0]}, index=idx)
+
+        class Client:
+            def get_all_positions(self):
+                return []
+
+        with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0), \
+             patch.object(trader, "MAX_POSITION_PCT", 0.5), \
+             patch.object(trader, "MIN_CASH_BUFFER_PCT", 0.05):
+            plan = trader.compute_rebalance_plan(
+                Client(), ["AMAT"], close, equity=10000.0, buying_power=10000.0,
+                signal_date="2026-06-03",
+            )
+
+        # 只有 1 个候选标的时，等权本会分到 100% 资金；集中度上限应把它封顶在 50%，
+        # 而不是把账户几乎全部资金压在单票上
+        self.assertEqual(plan["target_val"], 5000.0)
+
+    def test_buy_phase_skips_new_position_already_held(self):
+        trader = load_trader_module()
+
+        class Position:
+            symbol = "DOCN"
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def get_order_by_client_id(self, cid):
+                return type("Order", (), {"filled_qty": 5, "status": "filled"})()
+
+            def get_account(self):
+                return Account()
+
+            def get_all_positions(self):
+                return [Position()]
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+        state = {
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-07-09",
+                "signal_date": "2026-07-08",
+                "orders": [
+                    {"symbol": "KLAC", "qty": 5, "client_order_id": "tq-20260708-close-klac", "kind": "close"},
+                ],
+                "buy_carry": [
+                    {"symbol": "DOCN", "qty": 678, "price": 140.47, "is_new": True, "drift": -1.0},
+                ],
+            }
+        }
+
+        client = Client()
+        with patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
+            summary = trader.execute_buy_phase(client, state, "run-buy-dup", dry_run=False)
+
+        # DOCN 已经是持仓，计划却仍标记为"新建"（比如上一轮 state 卡住重放）——
+        # 不应该重复提交买单，避免同一标的仓位翻倍
+        self.assertEqual(client.submitted, [])
+        self.assertEqual(summary["orders"], [])
+
+    def test_buy_phase_earnings_recheck_cancels_new_and_add_without_forced_sell(self):
+        """新增：buy 阶段财报复核命中标的（无论新建 is_new=True 还是加仓 is_new=False），
+        一律取消本次买入，且不发起强制卖出（清仓交给下一轮 sell 阶段复核）。"""
+        trader = load_trader_module()
+
+        class Order:
+            def __init__(self, filled_qty, status="filled"):
+                self.filled_qty = filled_qty
+                self.status = status
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def get_order_by_client_id(self, cid):
+                return Order(2)
+
+            def get_account(self):
+                return Account()
+
+            def get_all_positions(self):
+                return []
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+        state = {
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-07-01",
+                "signal_date": "2026-07-01",
+                "orders": [
+                    {"symbol": "OLD", "qty": 2, "client_order_id": "tq-20260701-close-old", "kind": "close"},
+                ],
+                "buy_carry": [
+                    {"symbol": "NVDA", "qty": 3, "price": 100.0, "is_new": True, "drift": 0.0},
+                    {"symbol": "AAPL", "qty": 2, "price": 150.0, "is_new": False, "drift": -0.05},
+                ],
+            }
+        }
+        client = Client()
+
+        with patch.object(trader, "get_upcoming_earnings", return_value=({"NVDA", "AAPL"}, False)):
+            summary = trader.execute_buy_phase(client, state, "run-buy-earnings-skip", dry_run=False)
+
+        self.assertEqual(summary["earnings_skipped"], ["AAPL", "NVDA"])
+        self.assertEqual(summary["orders"], [])
+        self.assertEqual(client.submitted, [])
+
+    def test_buy_phase_earnings_reallocation_recomputes_qty_for_survivors(self):
+        """核心场景：财报复核剔除 1 只候选后，剩余候选按新的等权目标金额重新计算
+        买入股数——必须是与原计划不同的具体数值，不能留着过时份额或者空置资金。"""
+        trader = load_trader_module()
+
+        class Order:
+            def __init__(self, filled_qty, status="filled"):
+                self.filled_qty = filled_qty
+                self.status = status
+
+        class Account:
+            buying_power = "100000"
+
+        class Position:
+            def __init__(self, symbol, qty):
+                self.symbol = symbol
+                self.qty = qty
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def get_order_by_client_id(self, cid):
+                return Order(1)
+
+            def get_account(self):
+                return Account()
+
+            def get_all_positions(self):
+                return [Position("BBB", 10)]
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+        state = {
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-07-01",
+                "signal_date": "2026-07-01",
+                "orders": [],
+                "buy_carry": [
+                    {"symbol": "AAA", "qty": 30, "price": 100.0, "is_new": True, "drift": 0.0},
+                    {"symbol": "BBB", "qty": 50, "price": 50.0, "is_new": False, "drift": 0.0},
+                    {"symbol": "CCC", "qty": 37, "price": 80.0, "is_new": True, "drift": 0.0},
+                ],
+                "target_n": 3,
+            }
+        }
+        client = Client()
+
+        with patch.object(trader, "get_upcoming_earnings", return_value=({"CCC"}, False)), \
+             patch.object(trader, "MAX_POSITION_PCT", 0.5), \
+             patch.object(trader, "MIN_CASH_BUFFER_PCT", 0.05):
+            summary = trader.execute_buy_phase(client, state, "run-buy-realloc", dry_run=False, sizing_capital=10000.0)
+
+        self.assertEqual(summary["earnings_skipped"], ["CCC"])
+        self.assertTrue(summary["earnings_reallocated"])
+        self.assertEqual(summary["target_val_reallocated"], 4750.0)
+
+        order_qty = {o["symbol"]: o["qty"] for o in summary["orders"]}
+        self.assertEqual(order_qty["AAA"], 45)   # 原计划 30 股，重算后变为 45 股
+        self.assertEqual(order_qty["BBB"], 80)   # 原计划 50 股，重算后变为 80 股（新目标股数 90 - 已持仓 10）
+        self.assertNotIn("CCC", order_qty)
+
+    def test_sell_blackout_reallocates_all_surviving_targets_at_buy(self):
+        """sell 阶段剔除目标后，即使 buy 当天没有新增财报命中，也必须基于完整
+        目标快照重算；原 HOLD 标的同样可能产生新的正向差额。"""
+        trader = load_trader_module()
+
+        class Position:
+            def __init__(self, symbol, qty, price):
+                self.symbol = symbol
+                self.qty = qty
+                self.market_value = str(qty * price)
+
+        class Account:
+            buying_power = "49900"
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return {}
+
+        class Client:
+            def __init__(self):
+                self.nvda_sold = False
+
+            def get_all_positions(self):
+                positions = [Position("AAPL", 301, 100.0), Position("MSFT", 400, 50.0)]
+                if not self.nvda_sold:
+                    positions.append(Position("NVDA", 180, 200.0))
+                return positions
+
+            def get_orders(self, req):
+                return []
+
+            def get_order_by_client_id(self, cid):
+                return type("Order", (), {"filled_qty": 180, "status": "filled"})()
+
+            def get_account(self):
+                return Account()
+
+            def submit_order(self, req):
+                if req.side == trader.OrderSide.SELL and req.symbol == "NVDA":
+                    self.nvda_sold = True
+                return type("Order", (), {"id": "order-1", "status": "accepted"})()
+
+        plan = {
+            "plan_date": "2026-07-06",
+            "signal_date": "2026-07-06",
+            "target_syms": ["AAPL", "MSFT", "NVDA"],
+            "target_snapshot": {
+                "AAPL": {"price": 100.0},
+                "MSFT": {"price": 50.0},
+                "NVDA": {"price": 200.0},
+            },
+            "close_all": [],
+            "trim": [{"symbol": "NVDA", "qty": 30, "price": 200.0, "drift": 0.0}],
+            "buy": [{"symbol": "MSFT", "qty": 203, "price": 50.0, "is_new": False, "drift": 0.0}],
+            "target_n": 3,
+        }
+        state = {trader.CYCLE_PLAN_KEY: plan}
+        client = Client()
+        earnings = Mock(side_effect=[({"NVDA"}, False), (set(), False)])
+
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "get_upcoming_earnings", earnings), \
+             patch.object(trader, "MAX_POSITION_PCT", 0.5), \
+             patch.object(trader, "MIN_CASH_BUFFER_PCT", 0.05), \
+             patch.object(trader, "ensure_stop_orders_for_positions", return_value=0):
+            sell_summary = trader.execute_sell_phase(client, state, "run-sell-reallocate", dry_run=False)
+            buy_summary = trader.execute_buy_phase(
+                client, state, "run-buy-reallocate", dry_run=False, sizing_capital=100000.0,
+            )
+
+        self.assertEqual(sell_summary["earnings_forced_close"], ["NVDA"])
+        order_qty = {o["symbol"]: o["qty"] for o in buy_summary["orders"]}
+        self.assertEqual(order_qty, {"AAPL": 151, "MSFT": 504})
+        self.assertTrue(buy_summary["earnings_reallocated"])
+        self.assertEqual(buy_summary["target_val_reallocated"], 47500.0)
+
+    def test_buy_phase_earnings_recheck_without_sizing_capital_only_filters(self):
+        """新增：sizing_capital 缺失（如遗留的手工重试路径）时，财报剔除后
+        只过滤不重算份额，优雅降级，不抛异常。"""
+        trader = load_trader_module()
+
+        class Order:
+            def __init__(self, filled_qty, status="filled"):
+                self.filled_qty = filled_qty
+                self.status = status
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def get_order_by_client_id(self, cid):
+                return Order(1)
+
+            def get_account(self):
+                return Account()
+
+            def get_all_positions(self):
+                return []
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+        state = {
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-07-01",
+                "signal_date": "2026-07-01",
+                "orders": [],
+                "buy_carry": [
+                    {"symbol": "AAA", "qty": 30, "price": 100.0, "is_new": True, "drift": 0.0},
+                    {"symbol": "CCC", "qty": 37, "price": 80.0, "is_new": True, "drift": 0.0},
+                ],
+                "target_n": 2,
+            }
+        }
+        client = Client()
+
+        with patch.object(trader, "get_upcoming_earnings", return_value=({"CCC"}, False)):
+            summary = trader.execute_buy_phase(client, state, "run-buy-no-sizing", dry_run=False, sizing_capital=None)
+
+        self.assertEqual(summary["earnings_skipped"], ["CCC"])
+        self.assertFalse(summary["earnings_reallocated"])
+        order_qty = {o["symbol"]: o["qty"] for o in summary["orders"]}
+        self.assertEqual(order_qty, {"AAA": 30})  # 保留原计划份额，未重算
+
+    def test_buy_phase_earnings_recheck_missing_target_n_skips_reallocation(self):
+        """新增：pending_sell 缺少 target_n（升级前遗留 state 或手工拼装的重试计划）时，
+        即使 sizing_capital 存在也应跳过重算，只按财报结果过滤。"""
+        trader = load_trader_module()
+
+        class Order:
+            def __init__(self, filled_qty, status="filled"):
+                self.filled_qty = filled_qty
+                self.status = status
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def get_order_by_client_id(self, cid):
+                return Order(1)
+
+            def get_account(self):
+                return Account()
+
+            def get_all_positions(self):
+                return []
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+        state = {
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-07-01",
+                "signal_date": "2026-07-01",
+                "orders": [],
+                "buy_carry": [
+                    {"symbol": "AAA", "qty": 30, "price": 100.0, "is_new": True, "drift": 0.0},
+                    {"symbol": "CCC", "qty": 37, "price": 80.0, "is_new": True, "drift": 0.0},
+                ],
+                # 无 target_n 字段（模拟升级前遗留 state）
+            }
+        }
+        client = Client()
+
+        with patch.object(trader, "get_upcoming_earnings", return_value=({"CCC"}, False)):
+            summary = trader.execute_buy_phase(client, state, "run-buy-no-target-n", dry_run=False, sizing_capital=10000.0)
+
+        self.assertEqual(summary["earnings_skipped"], ["CCC"])
+        self.assertFalse(summary["earnings_reallocated"])
+        order_qty = {o["symbol"]: o["qty"] for o in summary["orders"]}
+        self.assertEqual(order_qty, {"AAA": 30})
+
+    def test_buy_phase_earnings_recheck_degraded_does_not_block_submission(self):
+        """新增：buy 阶段财报日历查询降级时只标记 degraded，不阻断买单正常提交。"""
+        trader = load_trader_module()
+
+        class Order:
+            def __init__(self, filled_qty, status="filled"):
+                self.filled_qty = filled_qty
+                self.status = status
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def get_order_by_client_id(self, cid):
+                return Order(1)
+
+            def get_account(self):
+                return Account()
+
+            def get_all_positions(self):
+                return []
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+        state = {
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-07-01",
+                "signal_date": "2026-07-01",
+                "orders": [],
+                "buy_carry": [
+                    {"symbol": "NVDA", "qty": 2, "price": 100.0, "is_new": True, "drift": 0.0},
+                ],
+                "target_n": 1,
+            }
+        }
+        client = Client()
+
+        def degraded_lookup(symbols, days_ahead, details=None):
+            if details is not None:
+                details["failed_symbols"] = ["NVDA"]
+            return set(), True
+
+        with patch.object(trader, "get_upcoming_earnings", side_effect=degraded_lookup):
+            summary = trader.execute_buy_phase(client, state, "run-buy-earnings-degraded", dry_run=False, sizing_capital=10000.0)
+
+        self.assertTrue(summary["earnings_recheck_degraded"])
+        self.assertEqual(summary["earnings_recheck_failed_symbols"], ["NVDA"])
+        self.assertEqual([o["symbol"] for o in summary["orders"]], ["NVDA"])
+        self.assertEqual(len(client.submitted), 1)
+
+    def test_sell_and_buy_phase_earnings_allow_applies_to_current_run(self):
+        trader = load_trader_module()
+
+        class Position:
+            symbol = "AAPL"
+            qty = "10"
+            market_value = "1000"
+
+        class Account:
+            buying_power = "100000"
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        class Client:
+            def get_all_positions(self):
+                return [Position()]
+
+            def get_account(self):
+                return Account()
+
+            def submit_order(self, req):
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+        state = {
+            trader.CYCLE_PLAN_KEY: {
+                "plan_date": "2026-07-08",
+                "signal_date": "2026-07-08",
+                "close_all": [],
+                "trim": [],
+                "buy": [
+                    {"symbol": "AAPL", "qty": 2, "price": 100.0, "is_new": False, "drift": 0.0},
+                ],
+                "target_n": 1,
+                "target_snapshot": {"AAPL": {"price": 100.0}},
+            }
+        }
+        client = Client()
+
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "get_upcoming_earnings", return_value=({"AAPL"}, False)):
+            sell_summary = trader.execute_sell_phase(
+                client, state, "run-sell-allow", dry_run=False, earnings_allow={"AAPL"},
+            )
+            buy_summary = trader.execute_buy_phase(
+                client, state, "run-buy-allow", dry_run=False,
+                sizing_capital=10000.0, earnings_allow={"AAPL"},
+            )
+
+        self.assertEqual(sell_summary["earnings_forced_close"], [])
+        self.assertEqual([o["symbol"] for o in buy_summary["orders"]], ["AAPL"])
+
+    def test_sell_earnings_email_lines_cover_all_failed_branch_data(self):
+        trader = load_trader_module()
+
+        lines = trader.sell_earnings_email_lines({
+            "earnings_forced_close": ["NVDA"],
+            "earnings_recheck_degraded": True,
+            "earnings_recheck_failed_symbols": ["MSFT"],
+        })
+
+        body = "\n".join(lines)
+        self.assertIn("NVDA", body)
+        self.assertIn("MSFT", body)
+        self.assertIn("财报日历查询降级", body)
 
     def test_log_tail_redacts_sensitive_lines(self):
         trader = load_trader_module()
@@ -1048,6 +1869,34 @@ class ExecutionSafetyTests(unittest.TestCase):
         self.assertFalse(degraded)
         self.assertEqual(blackout, set())
 
+    def test_earnings_window_uses_nyse_sessions_across_independence_day(self):
+        trader = load_trader_module()
+
+        start, cutoff = trader.earnings_window_bounds(trader.date(2026, 7, 2), 2)
+
+        self.assertEqual(start.date(), trader.date(2026, 7, 2))
+        # 2026-07-03 为独立日观察休市；后续两个 NYSE 交易日是 07-06、07-07。
+        self.assertEqual(cutoff.date(), trader.date(2026, 7, 7))
+
+    def test_get_upcoming_earnings_reports_failed_symbols_without_blocking(self):
+        trader = load_trader_module()
+        details = {}
+
+        def fake_calendar(sym):
+            if sym == "MSFT":
+                raise RuntimeError("calendar unavailable")
+            return {"Earnings Date": [trader.pd.Timestamp("2026-07-07")]}
+
+        with patch.object(trader, "_today_et", return_value=trader.date(2026, 7, 2)), \
+             patch.object(trader, "_fetch_earnings_calendar", side_effect=fake_calendar):
+            blackout, degraded = trader.get_upcoming_earnings(
+                ["AAPL", "MSFT"], days_ahead=2, details=details,
+            )
+
+        self.assertEqual(blackout, {"AAPL"})
+        self.assertFalse(degraded)
+        self.assertEqual(details["failed_symbols"], ["MSFT"])
+
     def test_plan_email_flags_earnings_degraded_status(self):
         trader = load_trader_module()
         plan = {
@@ -1100,7 +1949,8 @@ class ExecutionSafetyTests(unittest.TestCase):
         }
         state = {trader.CYCLE_PLAN_KEY: plan}
         client = Client()
-        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient):
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
             summary = trader.execute_sell_phase(client, state, "run-sell-partial", dry_run=False)
 
         self.assertFalse(summary["all_failed"])
@@ -1115,6 +1965,408 @@ class ExecutionSafetyTests(unittest.TestCase):
         self.assertEqual(retry_plan["trim"], [])
         self.assertEqual(retry_plan["signal_date"], "2026-07-01")
         self.assertNotEqual(retry_plan["plan_date"], "2026-07-01")
+
+    def test_sell_phase_earnings_recheck_forces_close_and_drops_buy_carry(self):
+        """新增：sell 阶段财报复核发现 HOLD/加仓标的临近财报，必须强制清仓，
+        并从 buy_carry 中剔除对应的加仓计划（不能继续按原计划加仓一个即将清仓的标的）。"""
+        trader = load_trader_module()
+
+        class Position:
+            def __init__(self, symbol, qty):
+                self.symbol = symbol
+                self.qty = qty
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return {}
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def get_all_positions(self):
+                return [Position("AAPL", 10)]
+
+            def get_orders(self, req):
+                return []
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "sell-1", "status": "accepted"})()
+
+        plan = {
+            "plan_date": "2026-07-01",
+            "signal_date": "2026-07-01",
+            "close_all": [],
+            "trim": [],
+            "buy": [{"symbol": "AAPL", "qty": 3, "price": 150.0, "is_new": False, "drift": -0.05}],
+            "target_n": 3,
+        }
+        state = {trader.CYCLE_PLAN_KEY: plan}
+        client = Client()
+
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "get_upcoming_earnings", return_value=({"AAPL"}, False)):
+            summary = trader.execute_sell_phase(client, state, "run-sell-earnings-hold", dry_run=False)
+
+        self.assertEqual(summary["earnings_forced_close"], ["AAPL"])
+        self.assertEqual(summary["buy_carry"], [])
+        sold = [(o["symbol"], o["qty"], o["kind"]) for o in summary["orders"]]
+        self.assertEqual(sold, [("AAPL", 10, "close")])
+        pending = state[trader.PENDING_SELL_KEY]
+        self.assertEqual(pending["buy_carry"], [])
+        self.assertEqual(pending["target_n"], 2)
+
+    def test_sell_phase_earnings_recheck_escalates_trim_to_full_close(self):
+        """新增：trim（部分减仓）标的若临近财报，必须升级为全额清仓，
+        不能因为原计划只是减仓就放过剩余持仓的财报风险。"""
+        trader = load_trader_module()
+
+        class Position:
+            def __init__(self, symbol, qty):
+                self.symbol = symbol
+                self.qty = qty
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return {}
+
+        class Client:
+            def get_all_positions(self):
+                return [Position("NVDA", 20)]
+
+            def get_orders(self, req):
+                return []
+
+            def submit_order(self, req):
+                return type("Order", (), {"id": "sell-1", "status": "accepted"})()
+
+        plan = {
+            "plan_date": "2026-07-01",
+            "signal_date": "2026-07-01",
+            "close_all": [],
+            "trim": [{"symbol": "NVDA", "qty": 5, "market_value": 1000.0}],
+            "buy": [],
+            "target_n": 4,
+        }
+        state = {trader.CYCLE_PLAN_KEY: plan}
+        client = Client()
+
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "get_upcoming_earnings", return_value=({"NVDA"}, False)):
+            summary = trader.execute_sell_phase(client, state, "run-sell-earnings-trim", dry_run=False)
+
+        self.assertEqual(summary["earnings_forced_close"], ["NVDA"])
+        sold = [(o["symbol"], o["qty"], o["kind"]) for o in summary["orders"]]
+        # 全额 20 股清仓，而不是原计划的 5 股减仓
+        self.assertEqual(sold, [("NVDA", 20, "close")])
+
+    def test_sell_phase_earnings_recheck_skipped_when_blackout_disabled(self):
+        """新增：EARNINGS_BLACKOUT_DAYS=0 时财报复核整体关闭，不应调用
+        get_all_positions/get_upcoming_earnings（避免无谓的持仓查询/网络调用）。"""
+        trader = load_trader_module()
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return {}
+
+        class Client:
+            def get_all_positions(self):
+                raise AssertionError("EARNINGS_BLACKOUT_DAYS=0 时不应查询持仓")
+
+            def submit_order(self, req):
+                return type("Order", (), {"id": "sell-1", "status": "accepted"})()
+
+        plan = {
+            "plan_date": "2026-07-01",
+            "signal_date": "2026-07-01",
+            "close_all": [{"symbol": "AMAT", "qty": 3}],
+            "trim": [],
+            "buy": [],
+            "target_n": 1,
+        }
+        state = {trader.CYCLE_PLAN_KEY: plan}
+        client = Client()
+        earnings_mock = Mock(side_effect=AssertionError("不应调用 get_upcoming_earnings"))
+
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0), \
+             patch.object(trader, "get_upcoming_earnings", earnings_mock):
+            summary = trader.execute_sell_phase(client, state, "run-sell-earnings-off", dry_run=False)
+
+        earnings_mock.assert_not_called()
+        self.assertEqual(summary["earnings_forced_close"], [])
+
+    def test_sell_phase_earnings_recheck_degraded_does_not_block_submission(self):
+        """新增：财报日历查询降级（yfinance 异常等）时只标记 degraded，
+        不阻断卖单正常提交（宁可漏判不阻塞主流程）。"""
+        trader = load_trader_module()
+
+        class Position:
+            def __init__(self, symbol, qty):
+                self.symbol = symbol
+                self.qty = qty
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return {}
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def get_all_positions(self):
+                return [Position("AAPL", 10)]
+
+            def get_orders(self, req):
+                return []
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "sell-1", "status": "accepted"})()
+
+        plan = {
+            "plan_date": "2026-07-01",
+            "signal_date": "2026-07-01",
+            "close_all": [{"symbol": "AMAT", "qty": 3}],
+            "trim": [],
+            "buy": [],
+            "target_n": 2,
+        }
+        state = {trader.CYCLE_PLAN_KEY: plan}
+        client = Client()
+
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "get_upcoming_earnings", return_value=(set(), True)):
+            summary = trader.execute_sell_phase(client, state, "run-sell-earnings-degraded", dry_run=False)
+
+        self.assertTrue(summary["earnings_recheck_degraded"])
+        self.assertFalse(summary["all_failed"])
+        sold = [o["symbol"] for o in summary["orders"]]
+        self.assertEqual(sold, ["AMAT"])
+
+    def test_sell_phase_target_n_decremented_by_forced_close_count(self):
+        """新增：pending_sell.target_n 需要按财报复核新增的强制清仓数量下调，
+        供 buy 阶段按剩余候选数重新计算等权买入金额。"""
+        trader = load_trader_module()
+
+        class Position:
+            def __init__(self, symbol, qty):
+                self.symbol = symbol
+                self.qty = qty
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return {}
+
+        class Client:
+            def get_all_positions(self):
+                return [Position("AAPL", 10), Position("MSFT", 8)]
+
+            def get_orders(self, req):
+                return []
+
+            def submit_order(self, req):
+                return type("Order", (), {"id": "sell-1", "status": "accepted"})()
+
+        plan = {
+            "plan_date": "2026-07-01",
+            "signal_date": "2026-07-01",
+            "close_all": [],
+            "trim": [],
+            "buy": [],
+            "target_n": 5,
+        }
+        state = {trader.CYCLE_PLAN_KEY: plan}
+        client = Client()
+
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "get_upcoming_earnings", return_value=({"AAPL", "MSFT"}, False)):
+            trader.execute_sell_phase(client, state, "run-sell-target-n", dry_run=False)
+
+        pending = state[trader.PENDING_SELL_KEY]
+        self.assertEqual(pending["target_n"], 3)
+
+    def test_sell_phase_non_target_blackout_does_not_reduce_target_count(self):
+        """plan 后外部新增的非目标持仓可以因财报被强制清仓，但它从未进入目标集合，
+        因此不能减少 target_n 或触发目标集合重算。"""
+        trader = load_trader_module()
+
+        class Position:
+            def __init__(self, symbol, qty):
+                self.symbol = symbol
+                self.qty = qty
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return {}
+
+        class Client:
+            def get_all_positions(self):
+                return [Position("AAPL", 10), Position("MSFT", 20), Position("XYZ", 5)]
+
+            def get_orders(self, req):
+                return []
+
+            def submit_order(self, req):
+                return type("Order", (), {"id": "sell-1", "status": "accepted"})()
+
+        state = {
+            trader.CYCLE_PLAN_KEY: {
+                "plan_date": "2026-07-08",
+                "signal_date": "2026-07-08",
+                "close_all": [],
+                "trim": [],
+                "buy": [],
+                "target_n": 2,
+                "target_snapshot": {
+                    "AAPL": {"price": 100.0},
+                    "MSFT": {"price": 50.0},
+                },
+            }
+        }
+
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "get_upcoming_earnings", return_value=({"XYZ"}, False)):
+            summary = trader.execute_sell_phase(Client(), state, "run-sell-external", dry_run=False)
+
+        pending = state[trader.PENDING_SELL_KEY]
+        self.assertEqual(summary["earnings_forced_close"], ["XYZ"])
+        self.assertEqual(pending["target_n"], 2)
+        self.assertEqual(set(pending["target_snapshot"]), {"AAPL", "MSFT"})
+        self.assertFalse(pending["reallocation_required"])
+
+    def test_buy_phase_held_blackout_budget_is_not_redistributed_before_exit(self):
+        """buy 阶段命中的已持仓标的不在本阶段卖出，其市值仍被占用，不能同时再分配
+        给剩余候选；这里只取消加仓并从可投资预算扣除该持仓市值。"""
+        trader = load_trader_module()
+
+        class Position:
+            def __init__(self, symbol, qty, market_value):
+                self.symbol = symbol
+                self.qty = qty
+                self.market_value = str(market_value)
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def get_account(self):
+                return Account()
+
+            def get_all_positions(self):
+                return [
+                    Position("AAPL", 301, 30100.0),
+                    Position("MSFT", 400, 20000.0),
+                ]
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+        state = {
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-07-09",
+                "signal_date": "2026-07-08",
+                "orders": [],
+                "buy_carry": [
+                    {"symbol": "MSFT", "qty": 203, "price": 50.0, "is_new": False, "drift": 0.0},
+                ],
+                "target_n": 2,
+                "target_snapshot": {
+                    "AAPL": {"price": 100.0},
+                    "MSFT": {"price": 50.0},
+                },
+                "reallocation_required": False,
+            }
+        }
+
+        with patch.object(trader, "get_upcoming_earnings", return_value=({"MSFT"}, False)), \
+             patch.object(trader, "MAX_POSITION_PCT", 1.0), \
+             patch.object(trader, "MIN_CASH_BUFFER_PCT", 0.05), \
+             patch.object(trader, "ensure_stop_orders_for_positions", return_value=0):
+            summary = trader.execute_buy_phase(
+                Client(), state, "run-buy-held-blackout", dry_run=False, sizing_capital=100000.0,
+            )
+
+        order_qty = {o["symbol"]: o["qty"] for o in summary["orders"]}
+        self.assertEqual(order_qty, {"AAPL": 413})
+        self.assertEqual(summary["excluded_held_value"], 20000.0)
+        self.assertEqual(summary["target_val_reallocated"], 75000.0)
+
+    def test_buy_phase_unfilled_sell_blackout_value_remains_locked(self):
+        """sell 阶段财报强制清仓标的若仍在真实持仓中，说明资金尚未释放；即使它已
+        从目标快照移除，buy 重算也必须扣除其当前市值。"""
+        trader = load_trader_module()
+
+        class Position:
+            def __init__(self, symbol, qty, market_value):
+                self.symbol = symbol
+                self.qty = qty
+                self.market_value = str(market_value)
+
+        class Account:
+            buying_power = "100000"
+
+        class Client:
+            def get_account(self):
+                return Account()
+
+            def get_all_positions(self):
+                return [
+                    Position("AAPL", 301, 30100.0),
+                    Position("NVDA", 180, 36000.0),
+                ]
+
+            def submit_order(self, req):
+                return type("Order", (), {"id": "buy-1", "status": "accepted"})()
+
+        state = {
+            trader.PENDING_SELL_KEY: {
+                "sell_date": "2026-07-09",
+                "signal_date": "2026-07-08",
+                "orders": [],
+                "buy_carry": [],
+                "target_n": 1,
+                "target_snapshot": {"AAPL": {"price": 100.0}},
+                "earnings_forced_close": ["NVDA"],
+                "reallocation_required": True,
+            }
+        }
+
+        with patch.object(trader, "get_upcoming_earnings", return_value=(set(), False)), \
+             patch.object(trader, "MAX_POSITION_PCT", 1.0), \
+             patch.object(trader, "MIN_CASH_BUFFER_PCT", 0.05):
+            summary = trader.execute_buy_phase(
+                Client(), state, "run-buy-unfilled-blackout", dry_run=False,
+                sizing_capital=100000.0,
+            )
+
+        order_qty = {o["symbol"]: o["qty"] for o in summary["orders"]}
+        self.assertEqual(order_qty, {"AAPL": 260})
+        self.assertEqual(summary["excluded_held_value"], 36000.0)
+        self.assertEqual(summary["target_val_reallocated"], 59000.0)
 
     def test_should_escalate_to_error_covers_no_email_statuses(self):
         """回归用例：非交易日等免打扰状态若在其处理逻辑内部再抛异常（如 _save_state 写盘

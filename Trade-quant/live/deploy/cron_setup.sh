@@ -94,7 +94,8 @@ PLAN_CMD="05 16 * * 1-5 TZ=America/New_York VENV_PYTHON=$PYTHON_BIN $RUNNER --ph
 SELL_CMD="50 15 * * 1-5 TZ=America/New_York VENV_PYTHON=$PYTHON_BIN $RUNNER --phase sell >> $LOG_DIR/trader.log 2>&1"
 # buy — T+2 开盘前 09:15 ET：核实卖单成交后，用实际可用资金提交买单
 CRON_CMD="15 09 * * 1-5 TZ=America/New_York VENV_PYTHON=$PYTHON_BIN $RUNNER --phase buy >> $LOG_DIR/trader.log 2>&1"
-# LULD 熔断重试：9:45 AM ET，buy 阶段之后约 30 分钟，重试循环直到 12:00 ET
+# 买单成交核实 + LULD 熔断重试：9:45 AM ET，buy 阶段之后约 30 分钟；
+# 先核实 pending_buy 并按真实持仓补止损，再处理 LULD 重试队列直到 12:00 ET。
 HALT_RETRY_CMD="45 09 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN alpaca_trader.py --retry-halted >> $LOG_DIR/trader.log 2>&1"
 WATCHDOG_CMD="20 20 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN service_watchdog.py >> $LOG_DIR/watchdog.log 2>&1"
 CRON_BEGIN="# TRADE_QUANT_CRON_BEGIN"
