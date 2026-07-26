@@ -39,8 +39,8 @@ grep -E "^(EXEC_MODE|ALPACA_DATA_FEED|ORDER_TIF|MAX_POSITION_PCT|SIM_CAPITAL_USD
 | `EXEC_MODE` | `moc_single` | **本次切换的核心改动** |
 | `ALPACA_DATA_FEED` | `iex` | 免费套餐禁查 sip 最近 15 分钟数据；若 VM 是 sip 且之前能跑，记录原因再改 |
 | `ORDER_TIF` | `day` | Jul 1 的 expired 买单已实锤 opg 隐患（moc_single 路径不受此项影响，仍建议改正） |
-| `MAX_POSITION_PCT` | `0.50` | **顺手排查 DOCN 678 股大单**：若此值是 1.0 或未设，就找到了根因 |
-| `SIM_CAPITAL_USD` | `5000` | 同上排查：若未设，sizing 会用全额净值 |
+| `MAX_POSITION_PCT` | `0.10` | **v2 冻结值**（§15.3 集中度教训）；DOCN 事故根因=旧代码无此防线 |
+| `SIM_CAPITAL_USD` | 留空 | v2 用真实净值 sizing（Top-20 下 $5k 模拟每仓仅 $250，取整误差过大） |
 
 同时拉取日志供 DOCN 大单排查：`grep -B5 -A5 "DOCN" trader.log | head -80`（找 Jul 9 的 sizing 计算行）。
 

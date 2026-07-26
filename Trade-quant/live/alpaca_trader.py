@@ -64,9 +64,11 @@ HALT_PENDING_FILE = Path(os.getenv("TRADE_QUANT_HALT_PENDING_FILE", str(LIVE_DIR
 sys.path.insert(0, str(RESEARCH_DIR))
 try:
     from factor_scanner import load_universe, compute_factors, build_liquidity_mask
-    from factor_combo_backtest import zscore_factors, CORE_FACTORS, REGIME_WEIGHTS
+    from factor_combo_backtest import zscore_factors
     from build_universe import build_universe as build_universe_dict, save_universe as save_universe_dict
-    from strategy_params import REBALANCE_DAYS, TOP_N, MIN_SCORE, VOL_MIN, KILL_DD
+    from strategy_params import (KILL_DD, V2_FACTOR_WEIGHTS, V2_TOP_N,
+                                 V2_MAX_POSITION_PCT, V2_REBALANCE_DAYS,
+                                 V2_BEAR_FLAT_DAYS, V2_VOL_TARGET, V2_VOL_SPAN)
 except ImportError as e:
     print(f"❌ 导入 research 模块失败：{e}")
     print("   请在 Trade-quant/live/ 目录内运行本脚本")
@@ -78,9 +80,12 @@ API_KEY    = os.getenv("ALPACA_API_KEY", "")
 SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 PAPER      = os.getenv("ALPACA_PAPER", "true").lower() != "false"
 
-# REBALANCE_DAYS / TOP_N / MIN_SCORE / VOL_MIN / KILL_DD 从 research/strategy_params.py
-# 导入（单一来源，见该文件顶部说明），保证回测与实盘口径一致。
-DATA_DAYS      = 350    # 拉取天数（RS_Beta 需 ≥ 60 天 Beta 稳定期，留 350 天余量）
+# 策略参数从 research/strategy_params.py 的 V2_* 导入（单一来源）。
+# v2（RESEARCH_LOG §15.7）：四因子等权 z + Top-20 + 10% 上限 + 无绝对过滤 +
+# bear_flat_45 + 熔断 -30% + VT0.25 + 10 日调仓。
+REBALANCE_DAYS = V2_REBALANCE_DAYS
+TOP_N          = V2_TOP_N
+DATA_DAYS      = 400    # 拉取天数（Mom_12_1/Prox_52W 需 252 交易日历史，留足余量）
 MIN_DATA_ROWS  = 150    # 单票最少有效日线数量
 DATA_SOURCE    = os.getenv("MARKET_DATA_SOURCE", "alpaca").lower()
 ALPACA_FEED    = os.getenv("ALPACA_DATA_FEED", "sip").lower()
@@ -129,11 +134,11 @@ HALT_RETRY_MAX_CHASE_PCT  = float(os.getenv("HALT_RETRY_MAX_CHASE_PCT", "0.05"))
 
 # 仓位规模模拟：留空/0 = 用 Alpaca 账户真实净值计算仓位；
 # 设置后仅用此金额代替账户净值计算买入数量，账户净值/回撤/Kill Switch 判断仍基于真实账户（百分比口径不受影响）
-SIM_CAPITAL_USD = float(os.getenv("SIM_CAPITAL_USD", "0"))
+SIM_CAPITAL_USD = float(os.getenv("SIM_CAPITAL_USD") or "0")   # 留空/未设 = 0 = 用真实净值
 
 # 单标的仓位集中度上限：等权分配（可投资金额 / 候选数）超过此比例时按此比例封顶，
 # 避免当日选股候选数过少（甚至只有1只）时单票吃满绝大部分资金——候选不足时宁可空仓，不加仓填满
-MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", "0.50"))
+MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", str(V2_MAX_POSITION_PCT)))
 
 # 最小现金缓冲：仓位计算只用 (1 - 此比例) 的资金去分配，其余始终留作现金，
 # 而不是把 100% 净值/模拟资金全部平分给候选标的
@@ -1556,8 +1561,10 @@ def compute_today_signals(
     vol:   pd.DataFrame,
 ) -> tuple:
     """
-    用最新收盘价计算今日 Combo Score，返回 (top_syms, regime_str, scores_series)。
-    逻辑与 factor_combo_backtest.py 完全一致，确保 Paper 信号可与回测复现对比。
+    v2 信号（RESEARCH_LOG §15.7/15.7b）：四因子等权 z 合成 → 流动性过滤 →
+    Top-20。无 MIN_SCORE/VOL_MIN 绝对过滤（§15.3 OOS 头号杀手）、无 regime
+    权重分表。熊市前 V2_BEAR_FLAT_DAYS 个连续交易日空仓。
+    返回 (top_syms, regime_str, scores_series)。与 signal_lab.py 口径一致。
     """
     qqq_close = close["QQQ"]
 
@@ -1566,59 +1573,83 @@ def compute_today_signals(
     c, h, l, v = close[stocks], high[stocks], low[stocks], vol[stocks]
 
     # ── 因子计算（复用 research 代码）───────────────────────────────────────
-    log.info("计算因子（RS_Beta / MFI_14 / BIAS_20 / HV_ratio）...")
+    log.info(f"计算 v2 因子（{' / '.join(V2_FACTOR_WEIGHTS)}）...")
     all_f = compute_factors(c, h, l, v, qqq_close)
-    core  = {f: all_f[f] for f in CORE_FACTORS if f in all_f}
+    core  = {f: all_f[f] for f in V2_FACTOR_WEIGHTS if f in all_f}
+    missing_factors = [f for f in V2_FACTOR_WEIGHTS if f not in all_f]
+    if missing_factors:
+        raise RuntimeError(f"v2 因子缺失 {missing_factors}——research/factor_scanner.py 版本不匹配")
 
     # ── 流动性掩码（20日均换手 >= $5M，价格 >= $2）─────────────────────────
     liquid = build_liquidity_mask(c, v)
     log.info(f"  今日流动性达标: {int(liquid.iloc[-1].sum())} 只")
 
     # ── 截面 Z-Score 标准化 ──────────────────────────────────────────────────
-    log.info("截面 Z-Score 标准化...")
     z_panels = zscore_factors(core, liquid)
 
-    # ── QQQ MA50 状态机 ──────────────────────────────────────────────────────
+    # ── QQQ MA50 状态机 + 熊市连续天数 ───────────────────────────────────────
+    qqq_ma50_series = qqq_close.rolling(50).mean()
     qqq_last = float(qqq_close.iloc[-1])
-    qqq_ma50 = float(qqq_close.rolling(50).mean().iloc[-1])
-    if qqq_last > qqq_ma50:
-        regime, rstr = 1, "牛市"
-    elif qqq_last < qqq_ma50:
-        regime, rstr = -1, "熊市"
-    else:
-        regime, rstr = 0, "震荡"
-    log.info(f"QQQ 状态: {rstr}  (QQQ={qqq_last:.2f}  MA50={qqq_ma50:.2f})")
+    qqq_ma50 = float(qqq_ma50_series.iloc[-1])
+    rstr = "牛市" if qqq_last > qqq_ma50 else ("熊市" if qqq_last < qqq_ma50 else "震荡")
 
-    # ── 今日 Combo Score（当日权重加权求和）────────────────────────────────
-    weights     = REGIME_WEIGHTS[regime]
+    bear_daily = (qqq_close < qqq_ma50_series)
+    bear_streak = 0
+    for is_bear in reversed(bear_daily.dropna().tolist()):
+        if not is_bear:
+            break
+        bear_streak += 1
+    log.info(f"QQQ 状态: {rstr}  (QQQ={qqq_last:.2f}  MA50={qqq_ma50:.2f}  连续熊市 {bear_streak} 天)")
+
+    # ── 今日 Combo（四因子等权 z，静态权重）──────────────────────────────────
     combo_today = pd.Series(0.0, index=c.columns)
-    for fname, w in weights.items():
-        if w != 0 and fname in z_panels:
-            combo_today = combo_today.add(
-                z_panels[fname].iloc[-1] * w, fill_value=0
-            )
+    for fname, w in V2_FACTOR_WEIGHTS.items():
+        combo_today = combo_today.add(z_panels[fname].iloc[-1] * w, fill_value=0)
 
-    # ── Vol_Shock（当日成交量 / 20日均量）────────────────────────────────────
-    vol_shock = (v.iloc[-1] / v.rolling(20).mean().iloc[-1]).fillna(0)
-
-    # ── 三重过滤：流动性 & Combo & Vol ──────────────────────────────────────
+    # ── 过滤：仅流动性（v2 无绝对分数/放量门槛）─────────────────────────────
     liquid_now = liquid.iloc[-1].reindex(combo_today.index, fill_value=False)
-    mask = (
-        liquid_now
-        & (combo_today > MIN_SCORE)
-        & (vol_shock.reindex(combo_today.index, fill_value=0) > VOL_MIN)
-    )
-    candidates = combo_today[mask].dropna()
-    top_syms   = candidates.nlargest(TOP_N).index.tolist()
+    candidates = combo_today[liquid_now].dropna()
 
-    log.info(f"候选股（Combo>{MIN_SCORE}, Vol>{VOL_MIN}x）: {len(candidates)} 只")
+    # ── bear_flat：熊市初期空仓 ──────────────────────────────────────────────
+    if rstr == "熊市" and 0 < bear_streak <= V2_BEAR_FLAT_DAYS:
+        log.warning(f"🐻 熊市第 {bear_streak}/{V2_BEAR_FLAT_DAYS} 天（bear_flat 窗口内），目标持仓=空")
+        return [], rstr, candidates
+
+    top_syms = candidates.nlargest(TOP_N).index.tolist()
+    log.info(f"流动性达标候选: {len(candidates)} 只 → Top-{TOP_N}")
     if top_syms:
         log.info(f"Top-{TOP_N}: {top_syms}")
         log.info(f"Scores: {candidates.nlargest(TOP_N).round(3).to_dict()}")
     else:
-        log.warning("⚠️  双过滤后无候选股（市场极端状态？）")
+        log.warning("⚠️  无候选股（数据异常？流动性掩码全灭？）")
 
     return top_syms, rstr, candidates
+
+
+def compute_vol_target_multiplier(client: TradingClient) -> float:
+    """
+    v2 事前风险层（§15.5）：从 Alpaca portfolio history 取近月日净值，
+    EWMA(V2_VOL_SPAN) 实现波动年化后 exposure = min(1, V2_VOL_TARGET/realized)。
+    查询失败时 fail-open 返回 1.0（满仓）并告警——VT 是"减速带"而非安全带，
+    单日失效影响有限；持续失效由每日对账/watchdog 暴露。
+    """
+    try:
+        from alpaca.trading.requests import GetPortfolioHistoryRequest
+        hist = client.get_portfolio_history(
+            GetPortfolioHistoryRequest(period="3M", timeframe="1D"))
+        eq = pd.Series([float(x) for x in hist.equity if x], dtype=float)
+        rets = eq.pct_change().dropna()
+        if len(rets) < 5:
+            log.warning(f"  VT：净值历史不足（{len(rets)} 天），倍数=1.0")
+            return 1.0
+        ewm_var = float(rets.pow(2).ewm(span=V2_VOL_SPAN).mean().iloc[-1])
+        realized = (ewm_var ** 0.5) * (252 ** 0.5)
+        mult = min(1.0, V2_VOL_TARGET / realized) if realized > 1e-6 else 1.0
+        log.info(f"  VT：实现波动 {realized:.1%}（EWMA{V2_VOL_SPAN}） 目标 {V2_VOL_TARGET:.0%} → 敞口倍数 {mult:.2f}")
+        return mult
+    except Exception as e:
+        log.warning(f"  VT：portfolio history 查询失败（{e}），fail-open 倍数=1.0")
+        return 1.0
 
 
 # ── 调仓状态机 ─────────────────────────────────────────────────────────────
@@ -3199,6 +3230,9 @@ def main():
                         help="忽略 5 日间隔，强制立刻调仓")
     parser.add_argument("--allow-duplicate", action="store_true",
                         help="允许同一 signal_date 重复提交订单（默认禁止）")
+    parser.add_argument("--allow-stale-data", action="store_true",
+                        help="允许最新 bar 不是今天（仅 --dry-run 生效，供非交易时段验证信号链路；"
+                             "真实下单路径忽略此项，数据新鲜度校验始终强制）")
     parser.add_argument("--retry-halted", action="store_true",
                         help="核实 pending_buy 并重试 LULD 挂单（由单独 cron 在 9:45 AM ET 触发）")
     parser.add_argument("--earnings-allow", type=str, default="",
@@ -3702,7 +3736,8 @@ def _main_impl(args, earnings_allow):
             status = "market_data_failed"
             raise
         try:
-            validate_panel(close, expect_today=is_trading_day(date.today()))
+            allow_stale = args.dry_run and getattr(args, "allow_stale_data", False)
+            validate_panel(close, expect_today=is_trading_day(date.today()) and not allow_stale)
         except Exception:
             status = "data_validation_failed"
             raise
@@ -3715,6 +3750,10 @@ def _main_impl(args, earnings_allow):
         stop_orders_submitted = ensure_stop_orders_for_positions(client, existing_positions, signal_date, args.dry_run)
         fills_recorded = record_recent_fills(client, audit, run_id, signal_date)
         target_syms, regime_str, candidates = compute_today_signals(close, high, low, vol)
+        # v2 事前风险层：目标波动率敞口缩放（§15.5），只降不加杠杆
+        vt_mult = compute_vol_target_multiplier(client)
+        sizing_capital *= vt_mult
+        run_summary["vol_target_multiplier"] = f"{vt_mult:.3f}"
         latest_prices = close.iloc[-1].to_dict()
         audit.append_signal_rows(run_id, signal_date, candidates, latest_prices)
         qqq_close = float(close["QQQ"].iloc[-1]) if "QQQ" in close.columns else None

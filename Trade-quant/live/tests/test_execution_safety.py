@@ -158,8 +158,9 @@ class ExecutionSafetyTests(unittest.TestCase):
                     Client(),
                     ["AMAT"],
                     close,
-                    5000.0,
-                    5000.0,
+                    # v2 MAX_POSITION_PCT=0.10 后，需足够资金让单票 10% 额度 ≥ 1 股
+                    50_000.0,
+                    50_000.0,
                     dry_run=False,
                     signal_date="2026-06-23",
                     run_id="run-opg-reject",
