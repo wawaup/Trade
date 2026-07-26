@@ -87,15 +87,16 @@ def _strip_tz(idx):
     return idx
 
 
-def load_panel(symbols, tf="1d", since=None):
-    closes, highs, lows, vols = {}, {}, {}, {}
+def load_panel(symbols, tf="1d", since=None, include_open=False):
+    closes, highs, lows, vols, opens = {}, {}, {}, {}, {}
     missing = []
+    cols = ["open", "high", "low", "close", "volume"] if include_open else ["high", "low", "close", "volume"]
     for sym in symbols:
         path = DATA_DIR / f"{sym.lower()}_{tf}_raw.parquet"
         if not path.exists():
             missing.append(sym)
             continue
-        df = pd.read_parquet(path, columns=["high", "low", "close", "volume"])
+        df = pd.read_parquet(path, columns=cols)
         df.index = _strip_tz(pd.to_datetime(df.index))
         if since:
             df = df.loc[since:]
@@ -105,13 +106,18 @@ def load_panel(symbols, tf="1d", since=None):
         highs[sym]  = df["high"]
         lows[sym]   = df["low"]
         vols[sym]   = df["volume"]
+        if include_open:
+            opens[sym] = df["open"]
     if missing:
         print(f"  [{len(missing)} 只缺数据，跳过]")
     idx = pd.DataFrame(closes).sort_index().index
-    return (pd.DataFrame(closes).reindex(idx),
-            pd.DataFrame(highs).reindex(idx),
-            pd.DataFrame(lows).reindex(idx),
-            pd.DataFrame(vols).reindex(idx))
+    panels = (pd.DataFrame(closes).reindex(idx),
+              pd.DataFrame(highs).reindex(idx),
+              pd.DataFrame(lows).reindex(idx),
+              pd.DataFrame(vols).reindex(idx))
+    if include_open:
+        return panels + (pd.DataFrame(opens).reindex(idx),)
+    return panels
 
 
 def load_benchmark(ticker, tf="1d", since=None):

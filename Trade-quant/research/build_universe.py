@@ -148,9 +148,15 @@ def try_fetch_arkk(timeout: int = 10) -> list[str]:
     return symbols
 
 
-def build_universe() -> dict:
-    """合并所有层，去重，返回 universe 字典。"""
-    print("构建股票池...")
+def build_universe(include_delisted: bool = False) -> dict:
+    """合并所有层，去重，返回 universe 字典。
+
+    include_delisted=True 时，把 EXCLUDED_SYMBOLS 中的已退市/私有化标的放回池子
+    （universe.json 以 delisted 字段标记），让它们的历史下跌段重新参与截面打分，
+    部分缓解幸存者偏差。注意 yfinance 对多数退市标的不再提供数据，能回补多少
+    取决于数据可得性（--fetch 时失败列表会如实显示）。
+    """
+    print("构建股票池..." + ("（含已退市标的）" if include_delisted else ""))
 
     arkk_symbols, arkk_status = fetch_arkk_with_status()
 
@@ -161,6 +167,8 @@ def build_universe() -> dict:
         "IGV":       IGV_COMPONENTS,
         "manual":    MANUAL_SUPPLEMENT,
     }
+    if include_delisted:
+        layers["delisted"] = sorted(EXCLUDED_SYMBOLS)
 
     seen: set[str] = set()
     all_symbols: list[str] = []
@@ -170,23 +178,35 @@ def build_universe() -> dict:
         added = 0
         for sym in symbols:
             sym = sym.upper().strip()
-            if sym and sym not in seen and sym not in BENCHMARKS and sym not in EXCLUDED_SYMBOLS:
-                seen.add(sym)
-                all_symbols.append(sym)
-                added += 1
+            if not sym or sym in seen or sym in BENCHMARKS:
+                continue
+            if sym in EXCLUDED_SYMBOLS and layer_name != "delisted":
+                continue
+            seen.add(sym)
+            all_symbols.append(sym)
+            added += 1
         layer_counts[layer_name] = added
         print(f"  {layer_name:12s}: +{added:3d} 只  (累计 {len(all_symbols)})")
 
     all_symbols.sort()
 
     universe = {
-        "version":    "1.0",
+        "version":    "1.1",
         "built_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "total":      len(all_symbols),
         "symbols":    all_symbols,
         "benchmarks": BENCHMARKS,
         "layer_counts": layer_counts,
         "source_status": {"ARKK_ARKW": arkk_status},
+        "delisted":   sorted(EXCLUDED_SYMBOLS & set(all_symbols)),
+        "survivorship_bias_warning": (
+            "本池子按构建日的当前 ETF 成分与手动清单生成，回溯用于历史回测时存在"
+            "幸存者偏差：当年可选但后来退市/腰斩的标的" +
+            ("已尽力回补（见 delisted 字段），但受数据可得性限制无法完全消除；"
+             if include_delisted else "未包含在内；") +
+            "手动层还包含事后已知的赢家（SMCI/VRT/IONQ 等）。"
+            "基于本池子的回测绩效应视为上限值，而非期望值。"
+        ),
     }
     print(f"\n最终池子规模: {len(all_symbols)} 只 + {len(BENCHMARKS)} 个基准")
     return universe
@@ -237,6 +257,8 @@ def main():
     parser.add_argument("--since",  default="2020-01-01", help="数据起始日期（仅 --fetch 时有效）")
     parser.add_argument("--tf",     default="1d", help="K线周期（仅 --fetch 时有效）")
     parser.add_argument("--info",   action="store_true", help="打印现有 universe.json 明细")
+    parser.add_argument("--include-delisted", action="store_true",
+                        help="把已退市/私有化标的放回池子（缓解幸存者偏差，数据可得性受限）")
     args = parser.parse_args()
 
     if args.info:
@@ -247,7 +269,7 @@ def main():
         print(f"\n完整列表:\n{u['symbols']}")
         return
 
-    universe = build_universe()
+    universe = build_universe(include_delisted=args.include_delisted)
     save_universe(universe)
 
     if args.fetch:

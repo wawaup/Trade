@@ -35,13 +35,10 @@ from factor_scanner import (
     load_universe, build_liquidity_mask, compute_factors,
 )
 from factor_combo_backtest import zscore_factors, CORE_FACTORS, REGIME_WEIGHTS
+from strategy_params import TOP_N, MIN_SCORE, VOL_MIN, REBALANCE_DAYS
 
-# ── 策略参数（与 alpaca_trader.py 一致）──────────────────────────────────────
+# ── 策略参数（TOP_N/MIN_SCORE/VOL_MIN/REBALANCE_DAYS 从 strategy_params.py 导入）
 EQUITY        = 5_000.0      # 实际账户净值 $5,000
-TOP_N         = 5
-MIN_SCORE     = 1.0
-VOL_MIN       = 1.2
-REBALANCE_DAYS = 5           # 每5个交易日调仓
 MIN_DATA_ROWS = 150          # 单只股票最少有效行
 DATA_WARMUP   = "2023-06-01" # 数据加载起点（2年回溯留足 warmup）
 GAP_BUFFER    = 1.05         # 与 alpaca_trader.py 一致的 5% 开盘缓冲
