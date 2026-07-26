@@ -220,6 +220,18 @@ def compute_factors(close, high, low, vol, qqq_close):
     neg_sum = neg_mf.rolling(14).sum().replace(0, np.nan)
     factors["MFI_14"] = 100 - 100 / (1 + pos_sum / neg_sum)
 
+    # ── §15.7 新增：文献级经典溢价（标准定义，零调参）─────────────────────
+    # 12-1 动量：t-252 → t-21 的收益，跳过最近一个月（短期反转段）。
+    # Jegadeesh & Titman (1993)；与现有 ≤20 日因子在时间尺度上正交。
+    factors["Mom_12_1"] = close.shift(21) / close.shift(252) - 1
+
+    # 距 52 周高点距离：George & Hwang (2004) 锚定效应，越接近高点越强。
+    factors["Prox_52W"] = close / close.rolling(252).max()
+
+    # 低波动异象：Ang et al. (2006)，取负号让"低波动"得高分。
+    log_ret_lv = np.log(close / close.shift(1))
+    factors["LowVol_60"] = -log_ret_lv.rolling(60).std()
+
     # Beta 调整残差动量：剔除大盘 Beta 后的个股独立强度
     # Beta = rolling 60日 cov(stock, QQQ) / var(QQQ)
     # RS_Beta = stock_ret20 - Beta * qqq_ret20（每只股票减去不同值，排名才有意义）
