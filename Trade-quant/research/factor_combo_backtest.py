@@ -293,7 +293,7 @@ def run_backtest_live(combo, vol_shock, close, open_px, liquid_mask,
                       exec_stage="moc_single",
                       bear_flat_days=0, choppy_half=True,
                       soft_drawdown=False, dd_ewma_span=10, soft_drawdown_scope="all",
-                      cooldown_min_days=20):
+                      cooldown_min_days=20, vol_target=None):
     dates    = close.index
     close_ff = close.ffill()
     cost     = cost_bps / 10_000.0
@@ -316,6 +316,13 @@ def run_backtest_live(combo, vol_shock, close, open_px, liquid_mask,
     # 回撤 EWMA：α = 2/(span+1)；只对回撤（负值）做平滑，正值保持"无回撤"含义
     dd_alpha            = 2.0 / (max(dd_ewma_span, 1) + 1)
     dd_ewma             = 0.0
+
+    # 事前风险层（§15.5）：组合自身日收益的 EWMA 方差 → 年化实现波动。
+    # vol_target（年化）设定时，exposure ×= min(1, target/realized)——只降不加杠杆。
+    VOL_SPAN            = 20
+    vol_alpha           = 2.0 / (VOL_SPAN + 1)
+    ewm_var             = None
+    prev_eq             = 1.0
 
     def _px(panel, dt, sym):
         try:
@@ -391,6 +398,13 @@ def run_backtest_live(combo, vol_shock, close, open_px, liquid_mask,
         eq = cash + pos_val
         equity_curve.iloc[i] = eq
 
+        # 实现波动更新（供 vol_target 用）
+        if prev_eq > 0:
+            r_day = eq / prev_eq - 1.0
+            ewm_var = r_day ** 2 if ewm_var is None else \
+                vol_alpha * r_day ** 2 + (1 - vol_alpha) * ewm_var
+        prev_eq = eq
+
         # ── 5) 高水位/回撤 EWMA/熔断 ───────────────────────────────────────
         if hwm is None:
             hwm = eq
@@ -447,6 +461,10 @@ def run_backtest_live(combo, vol_shock, close, open_px, liquid_mask,
         if soft_drawdown:
             exposure *= _drawdown_exposure_multiplier(dd_ewma, regime_now,
                                                      scope=soft_drawdown_scope)
+        if vol_target and ewm_var is not None and ewm_var > 0:
+            realized_ann = (ewm_var ** 0.5) * (252 ** 0.5)
+            if realized_ann > 1e-6:
+                exposure *= min(1.0, vol_target / realized_ann)
 
         n = len(top)
         w = min(1.0 / n, max_pos_pct) if n > 0 else 0.0
@@ -809,6 +827,11 @@ def main():
                         default="bear",
                         help="软减仓作用域：bear=仅熊市触发（默认，牛市保持满仓吃反弹）；"
                              "all=任何 regime 触发；non_bull=熊市+震荡触发")
+    parser.add_argument("--regime-buffer", type=float, default=0.0,
+                        help="QQQ MA50 缓冲带比例（如 0.02 = ±2%% 内视为震荡），防贴线抖动（§15.4）")
+    parser.add_argument("--vol-target", type=float, default=0.0,
+                        help="目标年化波动率（如 0.25）。>0 时按组合实现波动 EWMA 缩放仓位，"
+                             "只降不加杠杆（事前风险层，§15.5）；0=关闭")
     args = parser.parse_args()
 
     # ── 数据加载 ──────────────────────────────────────────────────────────────
@@ -841,8 +864,8 @@ def main():
     print("\nZ-Score 标准化...")
     z_panels = zscore_factors(core_panels, liquid)
 
-    # ── 宏观状态开关（QQQ MA50，无缓冲区）────────────────────────────────────
-    regime, qqq_ma50 = compute_spy_regime(qqq_close, ma_window=50, buffer=0.0)
+    # ── 宏观状态开关（QQQ MA50，可选缓冲带防贴线抖动）─────────────────────────
+    regime, qqq_ma50 = compute_spy_regime(qqq_close, ma_window=50, buffer=args.regime_buffer)
     regime_days = {
         "牛市": int((regime == 1).sum()),
         "熊市": int((regime == -1).sum()),
@@ -871,6 +894,7 @@ def main():
             soft_drawdown=args.soft_drawdown, dd_ewma_span=args.dd_ewma_span,
             soft_drawdown_scope=args.soft_drawdown_scope,
             cooldown_min_days=args.cooldown_days,
+            vol_target=args.vol_target if args.vol_target > 0 else None,
         )
         stage_desc = ("T+1 收盘 MOC 二腿" if args.exec_stage == "moc_single"
                       else "T+1 收盘卖 / T+2 开盘买")
