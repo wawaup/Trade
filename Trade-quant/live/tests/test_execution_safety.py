@@ -511,6 +511,114 @@ class ExecutionSafetyTests(unittest.TestCase):
         self.assertEqual(len(client.submitted), 1)
         self.assertFalse(summary["all_failed"])
 
+    def test_sell_phase_restores_stop_order_when_sell_submission_fails(self):
+        """回归用例：止损单已被撤销、但卖单提交失败——必须立即用原止损价把止损单
+        恢复回去，不能留下"止损已撤、卖单未成交"的裸露窗口。"""
+        trader = load_trader_module()
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return {}
+
+        class StopOrder:
+            id = "stop-amat-1"
+            client_order_id = "tq-stop-amat"
+            symbol = "AMAT"
+            stop_price = 75.0
+            qty = 3
+
+        class Client:
+            def __init__(self):
+                self.cancelled = []
+                self.submitted = []
+
+            def get_orders(self, req):
+                return [StopOrder()]
+
+            def cancel_order_by_id(self, order_id):
+                self.cancelled.append(order_id)
+
+            def submit_order(self, req):
+                # 卖单必然失败，止损恢复单必然成功——用 client_order_id 前缀区分两者
+                if req.client_order_id.startswith("tq-stop-"):
+                    self.submitted.append(req)
+                    return type("Order", (), {"id": "stop-restored-1", "status": "accepted"})()
+                raise RuntimeError("broker rejected sell order")
+
+        state = {
+            trader.CYCLE_PLAN_KEY: {
+                "plan_date": "2026-06-22",
+                "signal_date": "2026-06-22",
+                "close_all": [{"symbol": "AMAT", "qty": 3, "market_value": 500.0}],
+                "trim": [],
+                "buy": [],
+            }
+        }
+
+        client = Client()
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
+            summary = trader.execute_sell_phase(client, state, "run-sell-restore", dry_run=False)
+
+        self.assertEqual(client.cancelled, ["stop-amat-1"])
+        self.assertEqual(len(client.submitted), 1)
+        self.assertEqual(client.submitted[0].stop_price, 75.0)
+        self.assertEqual(summary["naked_positions"], [])
+        self.assertEqual([f["symbol"] for f in summary["submit_failed"]], ["AMAT"])
+
+    def test_sell_phase_reports_naked_position_when_stop_restore_also_fails(self):
+        """止损单撤销后，卖单和止损恢复单都失败：必须记录为 naked_positions，
+        供上层升级为最高优先级报警邮件，而不是被静默吞掉。"""
+        trader = load_trader_module()
+
+        class FakeDataClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_stock_latest_quote(self, req):
+                return {}
+
+        class StopOrder:
+            id = "stop-amat-1"
+            client_order_id = "tq-stop-amat"
+            symbol = "AMAT"
+            stop_price = 75.0
+            qty = 3
+
+        class Client:
+            def __init__(self):
+                self.cancelled = []
+
+            def get_orders(self, req):
+                return [StopOrder()]
+
+            def cancel_order_by_id(self, order_id):
+                self.cancelled.append(order_id)
+
+            def submit_order(self, req):
+                raise RuntimeError("broker unavailable")
+
+        state = {
+            trader.CYCLE_PLAN_KEY: {
+                "plan_date": "2026-06-22",
+                "signal_date": "2026-06-22",
+                "close_all": [{"symbol": "AMAT", "qty": 3, "market_value": 500.0}],
+                "trim": [],
+                "buy": [],
+            }
+        }
+
+        client = Client()
+        with patch.object(trader, "StockHistoricalDataClient", FakeDataClient), \
+             patch.object(trader, "EARNINGS_BLACKOUT_DAYS", 0):
+            summary = trader.execute_sell_phase(client, state, "run-sell-naked", dry_run=False)
+
+        self.assertEqual(len(summary["naked_positions"]), 1)
+        self.assertEqual(summary["naked_positions"][0]["symbol"], "AMAT")
+
     def test_buy_phase_writes_retry_plan_for_unconfirmed_sell_fills(self):
         """回归用例：卖单未确认完全成交时，剩余未卖出数量必须写回 cycle_plan
         供下一轮 sell 阶段重试，而不是被静默丢弃导致目标仓位永久跑偏（MEDIUM-2）。"""
@@ -1183,6 +1291,7 @@ class ExecutionSafetyTests(unittest.TestCase):
 
         class Quote:
             bid_price = 100.0
+            ask_price = 100.5
 
         class DataClient:
             def get_stock_latest_quote(self, req):
@@ -1232,6 +1341,323 @@ class ExecutionSafetyTests(unittest.TestCase):
         pending_order = state[trader.PENDING_BUY_KEY]["orders"][0]
         self.assertEqual(pending_order["status"], "submitted")
         self.assertEqual(pending_order["client_order_id"], "tq-retry-20260708-nvda")
+
+    def test_halt_retry_uses_ask_price_not_bid(self):
+        """回归用例：买单重试必须按卖一价（ask）追价，用买一价（bid）会低于最优卖价，
+        几乎不可能成交（此前版本 bid*0.999 是买卖方向搞反的错误）。"""
+        trader = load_trader_module()
+
+        class Quote:
+            bid_price = 90.0
+            ask_price = 100.0
+
+        class DataClient:
+            def get_stock_latest_quote(self, req):
+                return {"NVDA": Quote()}
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "halt-retry-1", "status": "accepted"})()
+
+        client = Client()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pending_file = Path(tmp) / "halt_pending.json"
+            pending_file.write_text(json.dumps({
+                "pending_date": "2026-07-08",
+                "orders": [{
+                    "symbol": "NVDA", "qty": 2, "ref_price": 100.0,
+                    "signal_date": "2026-07-08", "run_id": "run-buy-halt",
+                }],
+            }), encoding="utf-8")
+
+            with patch.object(trader, "HALT_PENDING_FILE", pending_file), \
+                 patch.object(trader, "TradingClient", return_value=client), \
+                 patch.object(trader, "StockHistoricalDataClient", return_value=DataClient()), \
+                 patch.object(trader, "_now_hour_et", return_value=10):
+                trader.retry_halted_orders(dry_run=False, state=None)
+
+        self.assertEqual(len(client.submitted), 1)
+        # limit_price = ask * 1.001，明显高于 bid，绝不能落在 bid 附近
+        self.assertAlmostEqual(client.submitted[0].limit_price, 100.1, places=2)
+
+    def test_halt_retry_skips_submission_when_chase_price_exceeds_cap(self):
+        """追涨超过 HALT_RETRY_MAX_CHASE_PCT 时本轮不提交（继续等待），不算失败也不报警。"""
+        trader = load_trader_module()
+
+        class Quote:
+            bid_price = 148.0
+            ask_price = 150.0  # 相对 ref_price=100 已经涨了 50%，远超 5% 上限
+
+        class DataClient:
+            def get_stock_latest_quote(self, req):
+                return {"NVDA": Quote()}
+
+        class Client:
+            def __init__(self):
+                self.submitted = []
+
+            def submit_order(self, req):
+                self.submitted.append(req)
+                return type("Order", (), {"id": "should-not-happen", "status": "accepted"})()
+
+        client = Client()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pending_file = Path(tmp) / "halt_pending.json"
+            pending_file.write_text(json.dumps({
+                "pending_date": "2026-07-08",
+                "orders": [{
+                    "symbol": "NVDA", "qty": 2, "ref_price": 100.0,
+                    "signal_date": "2026-07-08", "run_id": "run-buy-halt",
+                }],
+            }), encoding="utf-8")
+
+            with patch.object(trader, "HALT_PENDING_FILE", pending_file), \
+                 patch.object(trader, "TradingClient", return_value=client), \
+                 patch.object(trader, "StockHistoricalDataClient", return_value=DataClient()), \
+                 patch.object(trader, "_now_hour_et", return_value=10), \
+                 patch.object(trader, "HALT_RETRY_MAX_ATTEMPTS", 1), \
+                 patch.object(trader, "time") as time_mock:
+                summary = trader.retry_halted_orders(dry_run=False, state=None)
+
+        self.assertEqual(client.submitted, [])
+        self.assertIn("NVDA", summary["chase_capped_symbols"])
+        self.assertNotIn("NVDA", summary["confirmed_absent_symbols"])
+        self.assertNotIn("NVDA", summary["uncertain_symbols"])
+        # 追价放弃不属于"失败"，不应该触发 sleep（重试循环在 max_attempts 后正常退出）
+        time_mock.sleep.assert_not_called()
+
+    def test_halt_retry_exhausted_and_broker_confirms_404_abandons_without_alert(self):
+        """重试次数耗尽后，Broker 明确确认订单不存在（404）：静默放弃该笔买入意图，
+        从 pending_buy 中移除，不产生持仓也不发邮件报警（追涨没下单，不用发邮件）。"""
+        trader = load_trader_module()
+
+        class Quote:
+            bid_price = 100.0
+            ask_price = 100.5
+
+        class DataClient:
+            def get_stock_latest_quote(self, req):
+                return {"NVDA": Quote()}
+
+        class Client:
+            def __init__(self):
+                self.submit_calls = 0
+
+            def submit_order(self, req):
+                self.submit_calls += 1
+                raise RuntimeError("halted: trading halted")
+
+            def get_order_by_client_id(self, cid):
+                raise RuntimeError("404 order not found")
+
+            def get_all_positions(self):
+                return []
+
+        client = Client()
+        state = {
+            trader.PENDING_BUY_KEY: {
+                "submit_date": "2026-07-10",
+                "signal_date": "2026-07-08",
+                "orders": [{
+                    "symbol": "NVDA", "qty": 2,
+                    "client_order_id": "tq-20260708-enter-nvda",
+                    "status": "halted",
+                }],
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pending_file = Path(tmp) / "halt_pending.json"
+            pending_file.write_text(json.dumps({
+                "pending_date": "2026-07-08",
+                "orders": [{
+                    "symbol": "NVDA", "qty": 2, "ref_price": 100.0,
+                    "signal_date": "2026-07-08", "run_id": "run-buy-halt",
+                }],
+            }), encoding="utf-8")
+
+            with patch.object(trader, "HALT_PENDING_FILE", pending_file), \
+                 patch.object(trader, "TradingClient", return_value=client), \
+                 patch.object(trader, "StockHistoricalDataClient", return_value=DataClient()), \
+                 patch.object(trader, "_now_hour_et", return_value=10), \
+                 patch.object(trader, "HALT_RETRY_MAX_ATTEMPTS", 2), \
+                 patch.object(trader, "time") as time_mock:
+                summary = trader.retry_halted_orders(dry_run=False, state=state)
+
+        self.assertEqual(summary["confirmed_absent_symbols"], ["NVDA"])
+        self.assertEqual(summary["uncertain_symbols"], [])
+        self.assertNotIn(trader.PENDING_BUY_KEY, state)  # 全部解决，周期已收尾
+        self.assertFalse(pending_file.exists())
+        time_mock.sleep.assert_called()
+
+    def test_halt_retry_exhausted_but_broker_status_uncertain_keeps_pending_buy(self):
+        """重试次数耗尽后，Broker 状态不确定（既非明确 404，也无法确认不存在）：
+        必须保留 pending_buy（继续阻塞下一次 plan 周期），交由上层发邮件报警。"""
+        trader = load_trader_module()
+
+        class Quote:
+            bid_price = 100.0
+            ask_price = 100.5
+
+        class Client:
+            def submit_order(self, req):
+                raise RuntimeError("halted: trading halted")
+
+            def get_order_by_client_id(self, cid):
+                raise RuntimeError("network timeout")  # 不是明确的 404
+
+        class DataClient:
+            def get_stock_latest_quote(self, req):
+                return {"NVDA": Quote()}
+
+        client = Client()
+        state = {
+            trader.PENDING_BUY_KEY: {
+                "submit_date": "2026-07-10",
+                "signal_date": "2026-07-08",
+                "orders": [{
+                    "symbol": "NVDA", "qty": 2,
+                    "client_order_id": "tq-20260708-enter-nvda",
+                    "status": "halted",
+                }],
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pending_file = Path(tmp) / "halt_pending.json"
+            pending_file.write_text(json.dumps({
+                "pending_date": "2026-07-08",
+                "orders": [{
+                    "symbol": "NVDA", "qty": 2, "ref_price": 100.0,
+                    "signal_date": "2026-07-08", "run_id": "run-buy-halt",
+                }],
+            }), encoding="utf-8")
+
+            with patch.object(trader, "HALT_PENDING_FILE", pending_file), \
+                 patch.object(trader, "TradingClient", return_value=client), \
+                 patch.object(trader, "StockHistoricalDataClient", return_value=DataClient()), \
+                 patch.object(trader, "_now_hour_et", return_value=10), \
+                 patch.object(trader, "HALT_RETRY_MAX_ATTEMPTS", 1), \
+                 patch.object(trader, "time"):
+                summary = trader.retry_halted_orders(dry_run=False, state=state)
+
+        self.assertEqual(summary["uncertain_symbols"], ["NVDA"])
+        self.assertEqual(summary["confirmed_absent_symbols"], [])
+        self.assertIn(trader.PENDING_BUY_KEY, state)
+        pending_order = state[trader.PENDING_BUY_KEY]["orders"][0]
+        self.assertEqual(pending_order["status"], "halt_retry_stuck_uncertain")
+
+    def test_halt_retry_uncertain_persists_latest_attempted_client_order_id(self):
+        """回归用例：模糊提交异常导致状态不确定时，必须把本轮实际尝试的
+        client_order_id（tq-retry-...）写回 pending_buy，而不是留着重试前的旧 ID——
+        否则后续人工核实/下一次 reconcile 会查询错的订单，即使 Broker 已经用新 ID
+        接单成功，也会核实不到，导致真实持仓可能漏挂止损。"""
+        trader = load_trader_module()
+
+        class Quote:
+            bid_price = 100.0
+            ask_price = 100.5
+
+        class Client:
+            def submit_order(self, req):
+                raise RuntimeError("connection reset by peer")  # 模糊异常，非 duplicate/halt/404
+
+        class DataClient:
+            def get_stock_latest_quote(self, req):
+                return {"NVDA": Quote()}
+
+        client = Client()
+        state = {
+            trader.PENDING_BUY_KEY: {
+                "submit_date": "2026-07-10",
+                "signal_date": "2026-07-08",
+                "orders": [{
+                    "symbol": "NVDA", "qty": 2,
+                    "client_order_id": "tq-20260708-enter-nvda",
+                    "status": "halted",
+                }],
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pending_file = Path(tmp) / "halt_pending.json"
+            pending_file.write_text(json.dumps({
+                "pending_date": "2026-07-08",
+                "orders": [{
+                    "symbol": "NVDA", "qty": 2, "ref_price": 100.0,
+                    "signal_date": "2026-07-08", "run_id": "run-buy-halt",
+                }],
+            }), encoding="utf-8")
+
+            with patch.object(trader, "HALT_PENDING_FILE", pending_file), \
+                 patch.object(trader, "TradingClient", return_value=client), \
+                 patch.object(trader, "StockHistoricalDataClient", return_value=DataClient()), \
+                 patch.object(trader, "_now_hour_et", return_value=10), \
+                 patch.object(trader, "HALT_RETRY_MAX_ATTEMPTS", 1), \
+                 patch.object(trader, "time"):
+                summary = trader.retry_halted_orders(dry_run=False, state=state)
+
+        self.assertEqual(summary["uncertain_symbols"], ["NVDA"])
+        pending_order = state[trader.PENDING_BUY_KEY]["orders"][0]
+        self.assertEqual(pending_order["status"], "halt_retry_stuck_uncertain")
+        self.assertEqual(pending_order["client_order_id"], "tq-retry-20260708-nvda")
+
+    def test_retry_halted_entry_sends_email_only_for_uncertain_symbols(self):
+        """--retry-halted 分支之前完全不发邮件；现在必须仅在状态不确定时才发，
+        追涨放弃/确认不存在都不应该触发邮件。"""
+        trader = load_trader_module()
+
+        args = type("Args", (), {"retry_halted": True, "dry_run": False})()
+
+        with patch.object(trader, "TradingClient", return_value=object()), \
+             patch.object(trader, "_load_state", return_value={}), \
+             patch.object(trader, "_save_state"), \
+             patch.object(
+                 trader, "retry_halted_orders",
+                 return_value={
+                     "uncertain_symbols": ["NVDA"],
+                     "confirmed_absent_symbols": [],
+                     "chase_capped_symbols": [],
+                     "attempts_used": 6,
+                 },
+             ), \
+             patch.object(trader, "EMAIL_ENABLED", True), \
+             patch.object(trader, "send_email") as send_mock:
+            trader._main_impl(args, earnings_allow=set())
+
+        send_mock.assert_called_once()
+        subject, body = send_mock.call_args[0][0], send_mock.call_args[0][1]
+        self.assertIn("halt_retry_stuck_uncertain", subject)
+        self.assertIn("NVDA", body)
+
+    def test_retry_halted_entry_sends_no_email_when_only_chase_capped_or_absent(self):
+        trader = load_trader_module()
+
+        args = type("Args", (), {"retry_halted": True, "dry_run": False})()
+
+        with patch.object(trader, "TradingClient", return_value=object()), \
+             patch.object(trader, "_load_state", return_value={}), \
+             patch.object(trader, "_save_state"), \
+             patch.object(
+                 trader, "retry_halted_orders",
+                 return_value={
+                     "uncertain_symbols": [],
+                     "confirmed_absent_symbols": ["NVDA"],
+                     "chase_capped_symbols": ["AMAT"],
+                     "attempts_used": 6,
+                 },
+             ), \
+             patch.object(trader, "EMAIL_ENABLED", True), \
+             patch.object(trader, "send_email") as send_mock:
+            trader._main_impl(args, earnings_allow=set())
+
+        send_mock.assert_not_called()
 
     def test_kill_switch_locked_force_closes_remaining_positions(self):
         trader = load_trader_module()
@@ -2128,7 +2554,8 @@ class ExecutionSafetyTests(unittest.TestCase):
                 self.submitted = []
 
             def get_all_positions(self):
-                return [Position("AAPL", 10)]
+                # AMAT 必须真实在持仓中：F1 实时持仓夹取会跳过无持仓的卖单
+                return [Position("AAPL", 10), Position("AMAT", 3)]
 
             def get_orders(self, req):
                 return []

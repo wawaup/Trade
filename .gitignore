@@ -13,3 +13,9 @@ Trade-quant/live/state.json
 Trade-quant/live/halt_pending.json
 Trade-quant/live/audit/
 Trade-quant/live/venv/
+
+# 本地开发 venv 与 state 快照/备份（每台机器各自生成）
+Trade-quant/live/.venv312/
+Trade-quant/live/state.json.bak
+Trade-quant/live/state.json.corrupt*
+Trade-quant/live/state.json.pre-repair*

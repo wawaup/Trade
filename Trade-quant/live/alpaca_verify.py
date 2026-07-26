@@ -49,7 +49,6 @@ def verify_connection() -> bool:
     print(f"   净值 Equity : ${float(account.equity):>12,.2f}")
     print(f"   可用资金    : ${float(account.buying_power):>12,.2f}")
     print(f"   当前持仓数  : {len(positions)} 只")
-    print(f"   Pattern Day : {'是' if account.pattern_day_trader else '否'}")
     if positions:
         print(f"\n当前持仓：")
         for p in positions:
